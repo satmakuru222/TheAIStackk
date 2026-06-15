@@ -1,0 +1,132 @@
+{
+  "name": "07 - Shopify Order → Fulfillment + Thank You Email",
+  "nodes": [
+    {
+      "parameters": {
+        "topic": "orders/create",
+        "options": {}
+      },
+      "id": "node-shopify-trigger",
+      "name": "Shopify - New Order",
+      "type": "n8n-nodes-base.shopifyTrigger",
+      "typeVersion": 1,
+      "position": [260, 300],
+      "credentials": {
+        "shopifyApi": { "id": "shopify-cred", "name": "Shopify API" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const order = $input.first().json;\n\nconst lineItems = (order.line_items || []).map(item => ({\n  name: item.name,\n  quantity: item.quantity,\n  price: parseFloat(item.price),\n  sku: item.sku || '',\n  requiresShipping: item.requires_shipping !== false,\n  vendor: item.vendor || ''\n}));\n\nconst shippingAddress = order.shipping_address || order.billing_address || {};\nconst requiresFulfillment = lineItems.some(i => i.requiresShipping);\nconst isDigitalOnly = lineItems.every(i => !i.requiresShipping);\n\nconst itemsHtml = lineItems.map(item =>\n  `<tr>\n    <td style=\"padding:8px 12px;\">${item.name}</td>\n    <td style=\"padding:8px 12px; text-align:center;\">${item.quantity}</td>\n    <td style=\"padding:8px 12px; text-align:right;\">$${(item.price * item.quantity).toFixed(2)}</td>\n  </tr>`\n).join('');\n\nreturn [{\n  json: {\n    orderId: order.id,\n    orderName: order.name,\n    orderNumber: order.order_number,\n    email: order.email,\n    firstName: order.customer?.first_name || shippingAddress.first_name || 'Customer',\n    lastName: order.customer?.last_name || shippingAddress.last_name || '',\n    phone: order.customer?.phone || shippingAddress.phone || '',\n    totalPrice: parseFloat(order.total_price || 0).toFixed(2),\n    subtotalPrice: parseFloat(order.subtotal_price || 0).toFixed(2),\n    shippingPrice: parseFloat(order.total_shipping_price_set?.shop_money?.amount || 0).toFixed(2),\n    currency: order.currency || 'USD',\n    paymentStatus: order.financial_status,\n    fulfillmentStatus: order.fulfillment_status || 'unfulfilled',\n    requiresFulfillment,\n    isDigitalOnly,\n    shippingName: [shippingAddress.first_name, shippingAddress.last_name].join(' ').trim(),\n    shippingStreet: shippingAddress.address1 || '',\n    shippingCity: shippingAddress.city || '',\n    shippingProvince: shippingAddress.province || '',\n    shippingZip: shippingAddress.zip || '',\n    shippingCountry: shippingAddress.country || '',\n    lineItems,\n    itemsHtml,\n    itemCount: lineItems.reduce((s, i) => s + i.quantity, 0),\n    tags: order.tags || '',\n    createdAt: order.created_at\n  }\n}];"
+      },
+      "id": "node-parse-order",
+      "name": "Code - Parse Order Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.requiresFulfillment }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            },
+            {
+              "leftValue": "={{ $json.paymentStatus }}",
+              "rightValue": "paid",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-if-needs-shipping",
+      "name": "IF - Paid & Needs Shipping?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "resource": "fulfillmentOrder",
+        "operation": "create",
+        "orderId": "={{ $json.orderId }}",
+        "additionalFields": {
+          "notifyCustomer": true,
+          "trackingInfo": {
+            "trackingInfoDetails": {
+              "company": "Standard Shipping",
+              "number": "",
+              "url": ""
+            }
+          }
+        }
+      },
+      "id": "node-shopify-fulfill",
+      "name": "Shopify - Create Fulfillment",
+      "type": "n8n-nodes-base.shopify",
+      "typeVersion": 1,
+      "position": [920, 180],
+      "credentials": {
+        "shopifyApi": { "id": "shopify-cred", "name": "Shopify API" }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Code - Parse Order Data').item.json.email }}",
+        "subject": "Thank you for your order, {{ $('Code - Parse Order Data').item.json.firstName }}! 🎉 Order {{ $('Code - Parse Order Data').item.json.orderName }}",
+        "message": "<html><body style=\"font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; color: #333;\">\n<div style=\"background: #1a1a2e; padding: 24px; text-align: center; border-radius: 8px 8px 0 0;\">\n  <h1 style=\"color: white; margin: 0;\">Order Confirmed! 🎉</h1>\n  <p style=\"color: #c7d2fe; margin: 8px 0 0;\">{{ $('Code - Parse Order Data').item.json.orderName }}</p>\n</div>\n<div style=\"padding: 24px; background: #f9fafb;\">\n  <p>Hey {{ $('Code - Parse Order Data').item.json.firstName }},</p>\n  <p>Thank you so much for your order! We're getting it ready and will notify you when it ships.</p>\n\n  <h3 style=\"border-bottom: 2px solid #e5e7eb; padding-bottom: 8px;\">Order Summary</h3>\n  <table style=\"width:100%; border-collapse:collapse; background:white; border-radius:8px; overflow:hidden;\">\n    <thead><tr style=\"background:#4f46e5; color:white;\">\n      <th style=\"padding:10px 12px; text-align:left;\">Item</th>\n      <th style=\"padding:10px 12px; text-align:center;\">Qty</th>\n      <th style=\"padding:10px 12px; text-align:right;\">Price</th>\n    </tr></thead>\n    <tbody>{{ $('Code - Parse Order Data').item.json.itemsHtml }}</tbody>\n    <tfoot>\n      <tr style=\"border-top:2px solid #e5e7eb;\">\n        <td colspan=\"2\" style=\"padding:10px 12px; text-align:right;\"><strong>Total:</strong></td>\n        <td style=\"padding:10px 12px; text-align:right;\"><strong>${{ $('Code - Parse Order Data').item.json.totalPrice }} {{ $('Code - Parse Order Data').item.json.currency }}</strong></td>\n      </tr>\n    </tfoot>\n  </table>\n\n  {{ $('Code - Parse Order Data').item.json.requiresFulfillment ? '<h3 style=\"margin-top:24px;\">Shipping To</h3><p>' + $('Code - Parse Order Data').item.json.shippingStreet + '<br>' + $('Code - Parse Order Data').item.json.shippingCity + ', ' + $('Code - Parse Order Data').item.json.shippingProvince + ' ' + $('Code - Parse Order Data').item.json.shippingZip + '</p>' : '<p><strong>Your digital items are ready to access in your account.</strong></p>' }}\n\n  <p style=\"margin-top:24px;\">Questions? Reply to this email or visit our <a href=\"https://yourstore.com/help\">Help Center</a>.</p>\n  <p>With gratitude,<br><strong>Your Store Team</strong></p>\n</div>\n</body></html>",
+        "options": {}
+      },
+      "id": "node-gmail-thanks",
+      "name": "Gmail - Thank You Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [920, 420],
+      "credentials": {
+        "gmailOAuth2": { "id": "gmail-cred", "name": "Gmail OAuth2" }
+      }
+    }
+  ],
+  "connections": {
+    "Shopify - New Order": {
+      "main": [[{ "node": "Code - Parse Order Data", "type": "main", "index": 0 }]]
+    },
+    "Code - Parse Order Data": {
+      "main": [[{ "node": "IF - Paid & Needs Shipping?", "type": "main", "index": 0 }]]
+    },
+    "IF - Paid & Needs Shipping?": {
+      "main": [
+        [
+          { "node": "Shopify - Create Fulfillment", "type": "main", "index": 0 },
+          { "node": "Gmail - Thank You Email", "type": "main", "index": 0 }
+        ],
+        [{ "node": "Gmail - Thank You Email", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "shopify" }, { "name": "ecommerce" }, { "name": "fulfillment" }],
+  "meta": {
+    "description": "Triggers on new Shopify orders, parses all order details, checks if items need physical shipping and payment is confirmed, then auto-creates fulfillment and sends a branded thank-you email.",
+    "prerequisites": [
+      "Shopify API credentials (Private App or Custom App)",
+      "Gmail OAuth2 credentials",
+      "Shopify webhook configured for orders/create topic",
+      "Update email template with your store name/URL"
+    ],
+    "testingScenario": {
+      "happy_path": "Create test order in Shopify → fulfillment created, thank you email sent",
+      "edge_cases": [
+        "Unpaid order (pending) → IF prevents fulfillment, still sends email",
+        "Digital-only order → skips fulfillment, email says 'check your account'",
+        "Missing customer email → Gmail node will fail, add IF check",
+        "Shopify fulfillment already exists → may return 422"
+      ]
+    }
+  }
+}

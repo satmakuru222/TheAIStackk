@@ -1,0 +1,200 @@
+{
+  "name": "05 - New GitHub Issue → Notion Task + Slack",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "github-issue",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "GitHub Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.body.action }}",
+              "rightValue": "opened",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-if-opened",
+      "name": "IF - Issue Opened?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const issue = $input.first().json.body.issue;\nconst repo = $input.first().json.body.repository;\nconst sender = $input.first().json.body.sender;\n\n// Map GitHub labels to priority\nconst labels = (issue.labels || []).map(l => l.name);\nlet priority = 'Medium';\nif (labels.some(l => ['critical', 'p0', 'urgent', 'blocker'].includes(l.toLowerCase()))) priority = 'Urgent';\nelse if (labels.some(l => ['bug', 'high', 'p1'].includes(l.toLowerCase()))) priority = 'High';\nelse if (labels.some(l => ['enhancement', 'feature', 'p2'].includes(l.toLowerCase()))) priority = 'Low';\n\n// Determine type\nlet type = 'Task';\nif (labels.some(l => l.toLowerCase().includes('bug'))) type = 'Bug';\nelse if (labels.some(l => ['feature', 'enhancement', 'feature request'].includes(l.toLowerCase()))) type = 'Feature';\n\nconst body = issue.body || '';\nconst truncatedBody = body.length > 2000 ? body.substring(0, 2000) + '...\\n\\n[Truncated - see GitHub for full description]' : body;\n\nreturn [{\n  json: {\n    issueNumber: issue.number,\n    issueTitle: issue.title,\n    issueBody: truncatedBody,\n    issueUrl: issue.html_url,\n    issueState: issue.state,\n    labels: labels.join(', '),\n    priority,\n    type,\n    authorLogin: sender.login,\n    authorAvatar: sender.avatar_url,\n    repoName: repo.full_name,\n    repoUrl: repo.html_url,\n    createdAt: issue.created_at,\n    assignees: (issue.assignees || []).map(a => a.login).join(', ') || 'Unassigned',\n    milestone: issue.milestone?.title || 'None'\n  }\n}];"
+      },
+      "id": "node-parse-issue",
+      "name": "Code - Parse Issue Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "resource": "page",
+        "operation": "create",
+        "databaseId": {
+          "__rl": true,
+          "value": "YOUR_NOTION_DATABASE_ID",
+          "mode": "id"
+        },
+        "title": "={{ $json.type }} #{{ $json.issueNumber }}: {{ $json.issueTitle }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "Status", "type": "select", "selectValue": "Backlog" },
+            { "key": "Priority", "type": "select", "selectValue": "={{ $json.priority }}" },
+            { "key": "Type", "type": "select", "selectValue": "={{ $json.type }}" },
+            { "key": "GitHub Issue", "type": "url", "urlValue": "={{ $json.issueUrl }}" },
+            { "key": "Repository", "type": "rich_text", "textContent": "={{ $json.repoName }}" },
+            { "key": "Labels", "type": "rich_text", "textContent": "={{ $json.labels }}" },
+            { "key": "Assignees", "type": "rich_text", "textContent": "={{ $json.assignees }}" },
+            { "key": "Reporter", "type": "rich_text", "textContent": "={{ $json.authorLogin }}" },
+            { "key": "Milestone", "type": "rich_text", "textContent": "={{ $json.milestone }}" }
+          ]
+        },
+        "blockUi": {
+          "blockValues": [
+            {
+              "type": "heading_2",
+              "textContent": "Issue Description"
+            },
+            {
+              "type": "paragraph",
+              "textContent": "={{ $json.issueBody }}"
+            },
+            {
+              "type": "divider"
+            },
+            {
+              "type": "paragraph",
+              "textContent": "🔗 GitHub: {{ $json.issueUrl }}"
+            }
+          ]
+        }
+      },
+      "id": "node-notion-create",
+      "name": "Notion - Create Task Page",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [920, 200],
+      "credentials": {
+        "notionApi": { "id": "notion-cred", "name": "Notion API" }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C_DEV_CHANNEL", "mode": "id" },
+        "messageType": "block",
+        "blocksUi": {
+          "blocksValues": [
+            {
+              "type": "header",
+              "text": { "type": "plain_text", "text": "{{ $('Code - Parse Issue Data').item.json.type === 'Bug' ? '🐛' : $('Code - Parse Issue Data').item.json.type === 'Feature' ? '✨' : '📋' }} New {{ $('Code - Parse Issue Data').item.json.type }} #{{ $('Code - Parse Issue Data').item.json.issueNumber }}" }
+            },
+            {
+              "type": "section",
+              "text": { "type": "mrkdwn", "text": "*{{ $('Code - Parse Issue Data').item.json.issueTitle }}*\n_{{ $('Code - Parse Issue Data').item.json.repoName }}_" }
+            },
+            {
+              "type": "section",
+              "fields": [
+                { "type": "mrkdwn", "text": "*Priority:*\n{{ $('Code - Parse Issue Data').item.json.priority }}" },
+                { "type": "mrkdwn", "text": "*Reporter:*\n@{{ $('Code - Parse Issue Data').item.json.authorLogin }}" },
+                { "type": "mrkdwn", "text": "*Labels:*\n{{ $('Code - Parse Issue Data').item.json.labels || 'None' }}" },
+                { "type": "mrkdwn", "text": "*Assignees:*\n{{ $('Code - Parse Issue Data').item.json.assignees }}" }
+              ]
+            },
+            {
+              "type": "actions",
+              "elements": [
+                {
+                  "type": "button",
+                  "text": { "type": "plain_text", "text": "View on GitHub" },
+                  "url": "={{ $('Code - Parse Issue Data').item.json.issueUrl }}"
+                },
+                {
+                  "type": "button",
+                  "text": { "type": "plain_text", "text": "Open in Notion" },
+                  "url": "={{ $('Notion - Create Task Page').item.json.url }}",
+                  "style": "primary"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "id": "node-slack-notify",
+      "name": "Slack - Dev Channel Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [920, 400],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack API" } }
+    }
+  ],
+  "connections": {
+    "GitHub Webhook": {
+      "main": [[{ "node": "IF - Issue Opened?", "type": "main", "index": 0 }]]
+    },
+    "IF - Issue Opened?": {
+      "main": [
+        [{ "node": "Code - Parse Issue Data", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Code - Parse Issue Data": {
+      "main": [
+        [
+          { "node": "Notion - Create Task Page", "type": "main", "index": 0 },
+          { "node": "Slack - Dev Channel Notification", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "github" }, { "name": "notion" }, { "name": "dev" }],
+  "meta": {
+    "description": "Listens for new GitHub issue webhook events, parses labels into priority/type, creates a structured Notion database page, and notifies the dev Slack channel with direct links to both.",
+    "prerequisites": [
+      "GitHub webhook configured on repo (Settings → Webhooks → Issues events)",
+      "Notion integration with database access",
+      "Notion database with properties: Status (select), Priority (select), Type (select), GitHub Issue (url), Repository (text), Labels (text), Assignees (text), Reporter (text), Milestone (text)",
+      "Slack Bot Token with chat:write scope",
+      "Update YOUR_NOTION_DATABASE_ID"
+    ],
+    "testingScenario": {
+      "happy_path": "Create GitHub issue with 'bug' label → Notion page created, Slack notified",
+      "test_payload_structure": {
+        "action": "opened",
+        "issue": {
+          "number": 42,
+          "title": "Login page crashes on mobile Safari",
+          "body": "## Steps to Reproduce\n1. Open app on iOS Safari\n2. Click Login\n3. App crashes\n\n**Expected:** Login form appears\n**Actual:** White screen crash",
+          "html_url": "https://github.com/org/repo/issues/42",
+          "state": "open",
+          "labels": [{ "name": "bug" }, { "name": "high" }],
+          "assignees": [],
+          "milestone": null
+        },
+        "repository": { "full_name": "org/repo", "html_url": "https://github.com/org/repo" },
+        "sender": { "login": "developer123", "avatar_url": "https://github.com/developer123.png" }
+      }
+    }
+  }
+}

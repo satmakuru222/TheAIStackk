@@ -1,0 +1,236 @@
+{
+  "name": "15 - Multi-channel Customer Support Router",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "support-router",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "Unified Support Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\n\n// Normalize payload from multiple sources\n// Supports: Intercom, Zendesk, email form, Slack app, custom web form\nlet normalized = {};\n\nif (body.type === 'conversation.user.created' || body.data?.item?.type === 'conversation') {\n  // Intercom format\n  const conv = body.data?.item || body;\n  normalized = {\n    source: 'intercom',\n    externalId: conv.id,\n    email: conv.source?.author?.email || '',\n    name: conv.source?.author?.name || '',\n    message: conv.source?.body || '',\n    subject: conv.source?.subject || 'Intercom Chat',\n    tags: (conv.tags?.tags || []).map(t => t.name).join(', '),\n    isPaid: conv.contacts?.contacts?.[0]?.role === 'user'\n  };\n} else if (body.ticket || body.ticket_event) {\n  // Zendesk format\n  const ticket = body.ticket || {};\n  normalized = {\n    source: 'zendesk',\n    externalId: `ZD-${ticket.id}`,\n    email: ticket.requester?.email || ticket.email || '',\n    name: ticket.requester?.name || '',\n    message: ticket.description || '',\n    subject: ticket.subject || '',\n    tags: (ticket.tags || []).join(', '),\n    isPaid: ticket.type === 'problem' || ticket.priority === 'high'\n  };\n} else if (body.payload?.event_type?.startsWith('slack')) {\n  // Slack slash command or app mention\n  const event = body.event || body.payload || {};\n  normalized = {\n    source: 'slack',\n    externalId: event.ts || `SL-${Date.now()}`,\n    email: body.userEmail || '',\n    name: body.userName || event.user || '',\n    message: event.text || body.text || '',\n    subject: 'Slack Support Request',\n    tags: '',\n    isPaid: false\n  };\n} else {\n  // Generic web form\n  normalized = {\n    source: body.source || 'web-form',\n    externalId: body.id || `WF-${Date.now()}`,\n    email: body.email || '',\n    name: body.name || `${body.firstName || ''} ${body.lastName || ''}`.trim(),\n    message: body.message || body.description || '',\n    subject: body.subject || 'Support Request',\n    tags: body.tags || '',\n    isPaid: body.planType === 'paid' || body.subscription === 'pro'\n  };\n}\n\n// Determine tier: paid users get priority routing\nconst tier = normalized.isPaid ? 'paid' : 'free';\nconst urgencyKeywords = ['urgent', 'critical', 'asap', 'broken', 'down', 'not working', 'emergency', 'immediately'];\nconst isUrgent = urgencyKeywords.some(kw => normalized.message.toLowerCase().includes(kw) || normalized.subject.toLowerCase().includes(kw));\n\nnormalized.tier = tier;\nnormalized.isUrgent = isUrgent;\nnormalized.routingKey = `${tier}-${normalized.source}`;\nnormalized.timestamp = new Date().toISOString();\n\nreturn [{ json: normalized }];"
+      },
+      "id": "node-normalize",
+      "name": "Code - Normalize Multi-source Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 400]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.tier }}",
+        "rules": {
+          "rules": [
+            { "value2": "paid", "outputKey": "paid_tier" },
+            { "value2": "free", "outputKey": "free_tier" }
+          ]
+        },
+        "fallbackOutput": "last"
+      },
+      "id": "node-switch-tier",
+      "name": "Switch - Route by Tier",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [700, 400]
+    },
+    {
+      "parameters": {
+        "resource": "ticket",
+        "operation": "create",
+        "subject": "={{ $json.subject }} [PAID — {{ $json.source.toUpperCase() }}]",
+        "comment": "={{ $json.message }}",
+        "additionalFields": {
+          "type": "problem",
+          "priority": "={{ $json.isUrgent ? 'urgent' : 'high' }}",
+          "requester_email": "={{ $json.email }}",
+          "requester_name": "={{ $json.name }}",
+          "tags": "paid-customer {{ $json.source }} {{ $json.isUrgent ? 'urgent' : '' }}",
+          "custom_fields": [
+            { "id": "360000000001", "value": "={{ $json.source }}" },
+            { "id": "360000000002", "value": "={{ $json.externalId }}" }
+          ]
+        }
+      },
+      "id": "node-zendesk-paid",
+      "name": "Zendesk - Create Priority Ticket",
+      "type": "n8n-nodes-base.zendesk",
+      "typeVersion": 1,
+      "position": [920, 240],
+      "credentials": { "zendeskApi": { "id": "zendesk-cred", "name": "Zendesk API" } }
+    },
+    {
+      "parameters": {
+        "resource": "contact",
+        "operation": "upsert",
+        "additionalFields": {
+          "email": "={{ $json.email }}",
+          "firstname": "={{ $json.name.split(' ')[0] }}",
+          "lastname": "={{ $json.name.split(' ').slice(1).join(' ') }}",
+          "hs_lead_status": "OPEN_DEAL",
+          "notes_last_contacted": "={{ $json.timestamp }}"
+        }
+      },
+      "id": "node-hubspot-paid",
+      "name": "HubSpot - Update Paid Contact",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2,
+      "position": [920, 380],
+      "credentials": { "hubspotApi": { "id": "hubspot-cred", "name": "HubSpot API" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C_VIP_SUPPORT", "mode": "id" },
+        "messageType": "block",
+        "blocksUi": {
+          "blocksValues": [
+            {
+              "type": "header",
+              "text": { "type": "plain_text", "text": "💎 VIP Support Request {{ $json.isUrgent ? '— 🚨 URGENT' : '' }}" }
+            },
+            {
+              "type": "section",
+              "fields": [
+                { "type": "mrkdwn", "text": "*Customer:*\n{{ $json.name }} ({{ $json.email }})" },
+                { "type": "mrkdwn", "text": "*Source:*\n{{ $json.source }}" },
+                { "type": "mrkdwn", "text": "*Tier:*\n💎 Paid" },
+                { "type": "mrkdwn", "text": "*Urgent:*\n{{ $json.isUrgent ? '🚨 YES' : 'No' }}" }
+              ]
+            },
+            { "type": "section", "text": { "type": "mrkdwn", "text": "*Subject:* {{ $json.subject }}\n*Message:* {{ $json.message.substring(0, 400) }}{{ $json.message.length > 400 ? '...' : '' }}" } },
+            { "type": "context", "elements": [{ "type": "mrkdwn", "text": "Ticket created in Zendesk • HubSpot updated • SLA: 2 hours" }] }
+          ]
+        }
+      },
+      "id": "node-slack-paid",
+      "name": "Slack - VIP Support Channel",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [920, 520],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "resource": "ticket",
+        "operation": "create",
+        "subject": "={{ $json.subject }} [FREE — {{ $json.source.toUpperCase() }}]",
+        "comment": "={{ $json.message }}",
+        "additionalFields": {
+          "type": "question",
+          "priority": "normal",
+          "requester_email": "={{ $json.email }}",
+          "requester_name": "={{ $json.name }}",
+          "tags": "free-tier {{ $json.source }}"
+        }
+      },
+      "id": "node-zendesk-free",
+      "name": "Zendesk - Create Standard Ticket",
+      "type": "n8n-nodes-base.zendesk",
+      "typeVersion": 1,
+      "position": [920, 660],
+      "credentials": { "zendeskApi": { "id": "zendesk-cred", "name": "Zendesk API" } }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "We received your support request — Ticket #{{ $json.externalId }}",
+        "message": "<html><body style=\"font-family: Arial, sans-serif; max-width: 600px;\">\n<p>Hi {{ $json.name }},</p>\n<p>Thanks for reaching out! We've received your request and our team will get back to you shortly.</p>\n<div style=\"background:#f9fafb; padding:16px; border-radius:8px; margin:16px 0;\">\n  <p style=\"margin:0;\"><strong>Reference:</strong> {{ $json.externalId }}</p>\n  <p style=\"margin:8px 0 0;\"><strong>Subject:</strong> {{ $json.subject }}</p>\n  <p style=\"margin:8px 0 0;\"><strong>Expected response:</strong> {{ $json.tier === 'paid' ? 'Within 2 hours (priority support)' : 'Within 24 hours' }}</p>\n</div>\n<p>In the meantime, check our <a href=\"https://help.yoursite.com\">Help Center</a> for instant answers.</p>\n<p>Best,<br>The Support Team</p>\n</body></html>",
+        "options": {}
+      },
+      "id": "node-gmail-confirm",
+      "name": "Gmail - Send Confirmation",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1140, 460],
+      "credentials": { "gmailOAuth2": { "id": "gmail-cred", "name": "Gmail OAuth2" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"ticketId\": \"{{ $json.externalId }}\",\n  \"tier\": \"{{ $json.tier }}\",\n  \"message\": \"Support request received. Confirmation sent to {{ $json.email }}.\"\n}"
+      },
+      "id": "node-respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1360, 400]
+    }
+  ],
+  "connections": {
+    "Unified Support Webhook": {
+      "main": [[{ "node": "Code - Normalize Multi-source Input", "type": "main", "index": 0 }]]
+    },
+    "Code - Normalize Multi-source Input": {
+      "main": [[{ "node": "Switch - Route by Tier", "type": "main", "index": 0 }]]
+    },
+    "Switch - Route by Tier": {
+      "main": [
+        [
+          { "node": "Zendesk - Create Priority Ticket", "type": "main", "index": 0 },
+          { "node": "HubSpot - Update Paid Contact", "type": "main", "index": 0 },
+          { "node": "Slack - VIP Support Channel", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Zendesk - Create Standard Ticket", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Zendesk - Create Priority Ticket": {
+      "main": [[{ "node": "Gmail - Send Confirmation", "type": "main", "index": 0 }]]
+    },
+    "Zendesk - Create Standard Ticket": {
+      "main": [[{ "node": "Gmail - Send Confirmation", "type": "main", "index": 0 }]]
+    },
+    "Gmail - Send Confirmation": {
+      "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "support" }, { "name": "routing" }, { "name": "multi-channel" }],
+  "meta": {
+    "description": "Single webhook accepts support requests from Intercom, Zendesk, Slack, email form, or custom web form. Normalizes payload, routes paid users to Zendesk priority queue + HubSpot update + VIP Slack channel; free users to standard Zendesk queue. Sends confirmation email to both tiers.",
+    "prerequisites": [
+      "Zendesk API credentials",
+      "HubSpot API key",
+      "Slack Bot Token with chat:write scope",
+      "Gmail OAuth2 credentials",
+      "Configure your support channels (Intercom, Zendesk, etc.) to POST to the n8n webhook URL",
+      "Update Slack channel IDs (VIP support vs general support)",
+      "Verify Zendesk custom field IDs or remove custom_fields block"
+    ],
+    "testingScenario": {
+      "paid_user_test": {
+        "source": "web-form",
+        "email": "ceo@bigclient.com",
+        "name": "Big CEO",
+        "subject": "Critical: API is down!",
+        "message": "Our integration is completely broken. This is urgent, we're losing $10k/hour.",
+        "planType": "paid"
+      },
+      "free_user_test": {
+        "source": "web-form",
+        "email": "user@gmail.com",
+        "name": "Free User",
+        "subject": "Question about pricing",
+        "message": "Hi, how do I upgrade my account?",
+        "planType": "free"
+      },
+      "edge_cases": [
+        "Intercom webhook format → test with Intercom dev tools",
+        "Missing email → Gmail node fails, add IF check",
+        "Zendesk requester already exists → creates duplicate, add upsert logic",
+        "Slack slash command format differs from app mention format"
+      ]
+    }
+  }
+}

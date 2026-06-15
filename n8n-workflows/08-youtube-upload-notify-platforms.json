@@ -1,0 +1,204 @@
+{
+  "name": "08 - YouTube Upload → Notify All Platforms",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "youtube-upload",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "YouTube Webhook (PubSubHubbub)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300],
+      "notes": "Subscribe at: https://pubsubhubbub.appspot.com/subscribe\nHub URL: https://pubsubhubbub.appspot.com/\nTopic: https://www.youtube.com/xml/feeds/videos.xml?channel_id=YOUR_CHANNEL_ID"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse YouTube PubSubHubbub XML notification\nconst body = $input.first().json.body || $input.first().json;\nconst rawXml = typeof body === 'string' ? body : JSON.stringify(body);\n\n// Extract video ID from XML\nconst videoIdMatch = rawXml.match(/<yt:videoId>([^<]+)<\\/yt:videoId>/);\nconst titleMatch = rawXml.match(/<title>([^<]+)<\\/title>/);\nconst publishedMatch = rawXml.match(/<published>([^<]+)<\\/published>/);\nconst channelIdMatch = rawXml.match(/<yt:channelId>([^<]+)<\\/yt:channelId>/);\n\nconst videoId = videoIdMatch ? videoIdMatch[1].trim() : null;\nconst title = titleMatch ? titleMatch[1].replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').trim() : 'New Video';\nconst published = publishedMatch ? publishedMatch[1].trim() : new Date().toISOString();\nconst channelId = channelIdMatch ? channelIdMatch[1].trim() : $env['YOUTUBE_CHANNEL_ID'];\n\nif (!videoId) {\n  throw new Error('Could not parse video ID from YouTube notification');\n}\n\nconst videoUrl = `https://youtu.be/${videoId}`;\nconst thumbnailUrl = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;\n\nreturn [{\n  json: {\n    videoId,\n    videoUrl,\n    thumbnailUrl,\n    title,\n    published,\n    channelId,\n    channelUrl: `https://www.youtube.com/channel/${channelId}`\n  }\n}];"
+      },
+      "id": "node-parse-xml",
+      "name": "Code - Parse YouTube XML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://www.googleapis.com/youtube/v3/videos",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "id", "value": "={{ $json.videoId }}" },
+            { "name": "part", "value": "snippet,statistics,contentDetails" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-yt-api",
+      "name": "HTTP Request - Get Video Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [700, 300],
+      "credentials": {
+        "oAuth2Api": { "id": "youtube-oauth2-cred", "name": "YouTube OAuth2" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const webhook = $('Code - Parse YouTube XML').first().json;\nconst ytData = $input.first().json;\nconst video = ytData.items?.[0]?.snippet || {};\nconst stats = ytData.items?.[0]?.statistics || {};\n\nconst description = (video.description || '').substring(0, 300);\nconst tags = (video.tags || []).slice(0, 10).join(', ');\n\n// Generate platform-specific content\nconst tweetText = `🎬 New video just dropped!\\n\\n\"${webhook.title}\"\\n\\nWatch now 👇\\n${webhook.videoUrl}\\n\\n#YouTube #NewVideo`;\nconst slackMessage = `🎬 *New YouTube Video Published!*\\n\\n*${webhook.title}*\\n${description ? description + '...' : ''}\\n\\n👉 ${webhook.videoUrl}`;\nconst instagramCaption = `🎬 New video is LIVE!\\n\\n${webhook.title}\\n\\n${description.substring(0, 150)}...\\n\\n🔗 Link in bio!\\n\\n${tags.split(', ').map(t => '#' + t.replace(/\\s+/g, '')).join(' ')}`;\n\nreturn [{\n  json: {\n    ...webhook,\n    channelTitle: video.channelTitle || '',\n    description,\n    tags,\n    categoryId: video.categoryId,\n    tweetText: tweetText.substring(0, 280),\n    slackMessage,\n    instagramCaption: instagramCaption.substring(0, 2200),\n    thumbnailHq: video.thumbnails?.maxres?.url || video.thumbnails?.high?.url || webhook.thumbnailUrl\n  }\n}];"
+      },
+      "id": "node-set-messages",
+      "name": "Set - Format Platform Messages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.twitter.com/2/tweets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth1Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [{ "name": "text", "value": "={{ $json.tweetText }}" }]
+        },
+        "options": {}
+      },
+      "id": "node-twitter",
+      "name": "HTTP - Post to Twitter/X",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 160],
+      "credentials": { "oAuth1Api": { "id": "twitter-oauth1-cred", "name": "Twitter OAuth1" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C_CONTENT_CHANNEL", "mode": "id" },
+        "messageType": "block",
+        "blocksUi": {
+          "blocksValues": [
+            {
+              "type": "header",
+              "text": { "type": "plain_text", "text": "🎬 New YouTube Video Published!" }
+            },
+            {
+              "type": "section",
+              "text": { "type": "mrkdwn", "text": "*{{ $json.title }}*\n{{ $json.description }}..." },
+              "accessory": {
+                "type": "image",
+                "image_url": "={{ $json.thumbnailHq }}",
+                "alt_text": "Video thumbnail"
+              }
+            },
+            {
+              "type": "actions",
+              "elements": [
+                {
+                  "type": "button",
+                  "text": { "type": "plain_text", "text": "Watch Now ▶" },
+                  "url": "={{ $json.videoUrl }}",
+                  "style": "primary"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "id": "node-slack",
+      "name": "Slack - Notify Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1140, 300],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.instagram.com/v19.0/{{ $env['INSTAGRAM_BUSINESS_ID'] }}/media",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "image_url", "value": "={{ $json.thumbnailHq }}" },
+            { "name": "caption", "value": "={{ $json.instagramCaption }}" },
+            { "name": "access_token", "value": "={{ $env['INSTAGRAM_ACCESS_TOKEN'] }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-instagram-media",
+      "name": "HTTP - Instagram Create Media",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 440]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.instagram.com/v19.0/{{ $env['INSTAGRAM_BUSINESS_ID'] }}/media_publish",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "creation_id", "value": "={{ $json.id }}" },
+            { "name": "access_token", "value": "={{ $env['INSTAGRAM_ACCESS_TOKEN'] }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-instagram-publish",
+      "name": "HTTP - Instagram Publish Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1360, 440]
+    }
+  ],
+  "connections": {
+    "YouTube Webhook (PubSubHubbub)": {
+      "main": [[{ "node": "Code - Parse YouTube XML", "type": "main", "index": 0 }]]
+    },
+    "Code - Parse YouTube XML": {
+      "main": [[{ "node": "HTTP Request - Get Video Details", "type": "main", "index": 0 }]]
+    },
+    "HTTP Request - Get Video Details": {
+      "main": [[{ "node": "Set - Format Platform Messages", "type": "main", "index": 0 }]]
+    },
+    "Set - Format Platform Messages": {
+      "main": [
+        [
+          { "node": "HTTP - Post to Twitter/X", "type": "main", "index": 0 },
+          { "node": "Slack - Notify Team", "type": "main", "index": 0 },
+          { "node": "HTTP - Instagram Create Media", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "HTTP - Instagram Create Media": {
+      "main": [[{ "node": "HTTP - Instagram Publish Post", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "youtube" }, { "name": "social-media" }, { "name": "content" }],
+  "meta": {
+    "description": "Receives YouTube PubSubHubbub webhook when video is uploaded, fetches full details via YouTube Data API, then simultaneously posts to Twitter/X, notifies Slack team, and publishes on Instagram (2-step media create → publish).",
+    "prerequisites": [
+      "YouTube Data API v3 OAuth2 credentials",
+      "Twitter OAuth1 credentials",
+      "Slack Bot Token",
+      "Instagram Business Account with Graph API access token",
+      "Set env variables: YOUTUBE_CHANNEL_ID, INSTAGRAM_BUSINESS_ID, INSTAGRAM_ACCESS_TOKEN",
+      "Subscribe webhook to PubSubHubbub: https://pubsubhubbub.appspot.com/subscribe",
+      "Instagram thumbnail must be publicly accessible URL"
+    ],
+    "testingScenario": {
+      "happy_path": "Upload private YouTube video → verify all 3 platforms notified within 30 seconds",
+      "test_manually": "POST fake PubSubHubbub XML to webhook: <?xml version='1.0'?><feed xmlns:yt='http://www.youtube.com/xml/schemas/2015'><entry><yt:videoId>dQw4w9WgXcQ</yt:videoId><title>Test Video</title><published>2026-06-13T09:00:00Z</published><yt:channelId>UCxxxxxx</yt:channelId></entry></feed>"
+    }
+  }
+}

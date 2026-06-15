@@ -1,0 +1,249 @@
+{
+  "name": "03 - AI Support Ticket Triage",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "support-ticket",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "Ticket Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Verify HMAC signature to ensure ticket comes from a trusted source\nconst crypto = require('crypto');\nconst SECRET = $env['WEBHOOK_SECRET'] || 'change-me';\n\nconst body = $input.first().json;\nconst rawBody = JSON.stringify(body.body || body);\nconst signature = $input.first().json.headers?.['x-webhook-signature'] || '';\n\nconst expected = crypto\n  .createHmac('sha256', SECRET)\n  .update(rawBody)\n  .digest('hex');\n\nconst verified = signature === `sha256=${expected}`;\n\nif (!verified && $env['ENFORCE_SIGNATURE'] === 'true') {\n  throw new Error('Invalid webhook signature — request rejected');\n}\n\nconst ticket = body.body || body;\n\nreturn [{\n  json: {\n    signatureVerified: verified,\n    ticketId: ticket.id || `TKT-${Date.now()}`,\n    subject: ticket.subject || ticket.title || 'No Subject',\n    body: ticket.body || ticket.description || ticket.message || '',\n    email: ticket.email || ticket.from || '',\n    name: ticket.name || ticket.customer_name || 'Customer',\n    priority: ticket.priority || 'normal',\n    channel: ticket.channel || 'email',\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-verify-sig",
+      "name": "Code - Verify Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "message",
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a support ticket classifier. Analyze the ticket and respond with a JSON object containing:\n- category: one of [billing, technical, account, feature_request, bug, complaint, general]\n- urgency: one of [low, medium, high, critical]\n- sentiment: one of [positive, neutral, negative, angry]\n- department: one of [billing_team, tech_support, account_management, product_team, general_support]\n- summary: 1-sentence summary of the issue\n- suggested_response_tone: one of [empathetic, technical, informative, apologetic]\n\nRespond ONLY with valid JSON, no markdown."
+            },
+            {
+              "role": "user",
+              "content": "Subject: {{ $json.subject }}\n\nMessage: {{ $json.body }}\n\nCustomer: {{ $json.name }} ({{ $json.email }})"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.2,
+          "maxTokens": 300
+        }
+      },
+      "id": "node-openai-classify",
+      "name": "OpenAI - Categorize Ticket",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.7,
+      "position": [700, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "openai-cred",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const ticket = $('Code - Verify Signature').first().json;\nconst aiRaw = $input.first().json.message?.content || $input.first().json.choices?.[0]?.message?.content || '{}';\n\nlet aiResult;\ntry {\n  aiResult = JSON.parse(aiRaw);\n} catch (e) {\n  aiResult = { category: 'general', urgency: 'medium', sentiment: 'neutral', department: 'general_support', summary: 'Unable to parse AI classification' };\n}\n\nreturn [{\n  json: {\n    ...ticket,\n    ...aiResult,\n    aiClassified: true\n  }\n}];"
+      },
+      "id": "node-parse-ai",
+      "name": "Code - Parse AI Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.department }}",
+        "rules": {
+          "rules": [
+            { "value2": "billing_team", "outputKey": "billing" },
+            { "value2": "tech_support", "outputKey": "tech" },
+            { "value2": "account_management", "outputKey": "account" },
+            { "value2": "product_team", "outputKey": "product" }
+          ]
+        },
+        "fallbackOutput": "last"
+      },
+      "id": "node-switch",
+      "name": "Switch - Route by Department",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [1140, 300]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C_BILLING_CHANNEL", "mode": "id" },
+        "messageType": "block",
+        "blocksUi": {
+          "blocksValues": [
+            { "type": "header", "text": { "type": "plain_text", "text": "💳 Billing Ticket — {{ $json.urgency.toUpperCase() }} Priority" } },
+            { "type": "section", "fields": [
+              { "type": "mrkdwn", "text": "*ID:* {{ $json.ticketId }}" },
+              { "type": "mrkdwn", "text": "*Customer:* {{ $json.name }}" },
+              { "type": "mrkdwn", "text": "*Email:* {{ $json.email }}" },
+              { "type": "mrkdwn", "text": "*Sentiment:* {{ $json.sentiment }}" }
+            ]},
+            { "type": "section", "text": { "type": "mrkdwn", "text": "*Summary:* {{ $json.summary }}" }}
+          ]
+        }
+      },
+      "id": "node-slack-billing",
+      "name": "Slack - Billing Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1360, 140],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C_TECH_CHANNEL", "mode": "id" },
+        "messageType": "block",
+        "blocksUi": {
+          "blocksValues": [
+            { "type": "header", "text": { "type": "plain_text", "text": "🔧 Tech Support Ticket — {{ $json.urgency.toUpperCase() }} Priority" } },
+            { "type": "section", "fields": [
+              { "type": "mrkdwn", "text": "*ID:* {{ $json.ticketId }}" },
+              { "type": "mrkdwn", "text": "*Customer:* {{ $json.name }}" },
+              { "type": "mrkdwn", "text": "*Category:* {{ $json.category }}" },
+              { "type": "mrkdwn", "text": "*Sentiment:* {{ $json.sentiment }}" }
+            ]},
+            { "type": "section", "text": { "type": "mrkdwn", "text": "*Summary:* {{ $json.summary }}" }},
+            { "type": "section", "text": { "type": "mrkdwn", "text": "*Message:* {{ $json.body.substring(0, 500) }}" }}
+          ]
+        }
+      },
+      "id": "node-slack-tech",
+      "name": "Slack - Tech Support",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1360, 260],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C_ACCOUNT_CHANNEL", "mode": "id" },
+        "messageType": "text",
+        "text": "👤 *Account Ticket* [{{ $json.urgency }}] - {{ $json.name }} ({{ $json.email }})\n*Summary:* {{ $json.summary }}"
+      },
+      "id": "node-slack-account",
+      "name": "Slack - Account Mgmt",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1360, 380],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C_PRODUCT_CHANNEL", "mode": "id" },
+        "messageType": "text",
+        "text": "💡 *Product Feedback / Feature Request* from {{ $json.name }}\n*Summary:* {{ $json.summary }}\n*Full message:* {{ $json.body.substring(0, 300) }}..."
+      },
+      "id": "node-slack-product",
+      "name": "Slack - Product Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1360, 500],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C_GENERAL_SUPPORT", "mode": "id" },
+        "messageType": "text",
+        "text": "📩 *General Support Ticket* [{{ $json.urgency }}]\n*From:* {{ $json.name }} ({{ $json.email }})\n*Category:* {{ $json.category }}\n*Summary:* {{ $json.summary }}"
+      },
+      "id": "node-slack-general",
+      "name": "Slack - General Support",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1360, 620],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"success\": true, \"ticketId\": \"{{ $('Code - Parse AI Result').item.json.ticketId }}\", \"department\": \"{{ $('Code - Parse AI Result').item.json.department }}\" }"
+      },
+      "id": "node-respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1140, 520]
+    }
+  ],
+  "connections": {
+    "Ticket Webhook": {
+      "main": [[{ "node": "Code - Verify Signature", "type": "main", "index": 0 }]]
+    },
+    "Code - Verify Signature": {
+      "main": [[{ "node": "OpenAI - Categorize Ticket", "type": "main", "index": 0 }]]
+    },
+    "OpenAI - Categorize Ticket": {
+      "main": [[{ "node": "Code - Parse AI Result", "type": "main", "index": 0 }]]
+    },
+    "Code - Parse AI Result": {
+      "main": [
+        [
+          { "node": "Switch - Route by Department", "type": "main", "index": 0 },
+          { "node": "Respond to Webhook", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Switch - Route by Department": {
+      "main": [
+        [{ "node": "Slack - Billing Team", "type": "main", "index": 0 }],
+        [{ "node": "Slack - Tech Support", "type": "main", "index": 0 }],
+        [{ "node": "Slack - Account Mgmt", "type": "main", "index": 0 }],
+        [{ "node": "Slack - Product Team", "type": "main", "index": 0 }],
+        [{ "node": "Slack - General Support", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "support" }, { "name": "ai" }, { "name": "routing" }],
+  "meta": {
+    "description": "Receives support tickets via webhook, verifies HMAC signature, uses GPT-4o to classify category/urgency/sentiment, then routes via Switch node to the correct Slack department channel.",
+    "prerequisites": [
+      "OpenAI API key with gpt-4o access",
+      "Slack Bot Token with chat:write scope",
+      "Set WEBHOOK_SECRET env variable in n8n",
+      "Set ENFORCE_SIGNATURE=true to reject unsigned requests",
+      "Create Slack channels: billing, tech-support, account-management, product, general-support"
+    ],
+    "testingScenario": {
+      "happy_path": "POST billing complaint → routes to billing channel with correct urgency",
+      "test_payloads": [
+        { "subject": "Charged twice this month", "body": "I was billed twice for my subscription. This needs to be fixed ASAP!", "email": "customer@test.com", "name": "Test User" },
+        { "subject": "App crashes on login", "body": "The mobile app crashes every time I try to log in on iOS 17.", "email": "dev@test.com", "name": "Dev User" },
+        { "subject": "Feature request: dark mode", "body": "Would love a dark mode option in the dashboard.", "email": "user@test.com", "name": "Power User" }
+      ]
+    }
+  }
+}

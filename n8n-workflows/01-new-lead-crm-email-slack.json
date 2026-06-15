@@ -1,0 +1,220 @@
+{
+  "name": "01 - New Lead → CRM + Welcome Email + Slack Alert",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "new-lead",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-lead",
+      "name": "Form Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300],
+      "webhookId": "lead-form-webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate and sanitize lead data\nconst body = $input.first().json.body || $input.first().json;\n\nif (!body.email) {\n  throw new Error('Missing required field: email');\n}\n\nconst email = body.email.trim().toLowerCase();\nconst emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\nif (!emailRegex.test(email)) {\n  throw new Error('Invalid email format');\n}\n\nreturn [{\n  json: {\n    firstName: (body.firstName || body.first_name || '').trim(),\n    lastName: (body.lastName || body.last_name || '').trim(),\n    email: email,\n    phone: body.phone || '',\n    company: body.company || '',\n    source: body.source || 'website-form',\n    message: body.message || '',\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-validate-lead",
+      "name": "Validate & Sanitize Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "resource": "contact",
+        "operation": "create",
+        "additionalFields": {
+          "email": "={{ $json.email }}",
+          "firstname": "={{ $json.firstName }}",
+          "lastname": "={{ $json.lastName }}",
+          "phone": "={{ $json.phone }}",
+          "company": "={{ $json.company }}",
+          "lead_status": "NEW",
+          "hs_lead_status": "NEW",
+          "lifecyclestage": "lead",
+          "lead_source": "={{ $json.source }}"
+        }
+      },
+      "id": "node-hubspot-create",
+      "name": "HubSpot - Create Contact",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2,
+      "position": [700, 180],
+      "credentials": {
+        "hubspotApi": {
+          "id": "hubspot-cred",
+          "name": "HubSpot API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Validate & Sanitize Lead').item.json.email }}",
+        "subject": "Welcome to The AI Stack, {{ $('Validate & Sanitize Lead').item.json.firstName }}! 🚀",
+        "message": "<html><body style=\"font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;\">\n<h2 style=\"color: #1a1a2e;\">Hey {{ $('Validate & Sanitize Lead').item.json.firstName }},</h2>\n<p>Thanks for reaching out! We're thrilled you're interested in The AI Stack.</p>\n<p>Here's what happens next:</p>\n<ul>\n  <li>✅ Our team will review your inquiry within 24 hours</li>\n  <li>📞 A specialist will reach out to schedule a discovery call</li>\n  <li>🎯 We'll create a custom AI automation plan for your business</li>\n</ul>\n<p>In the meantime, check out our latest resources:</p>\n<p><a href=\"https://theaistack.com/resources\" style=\"color: #4f46e5;\">Browse AI Automation Templates →</a></p>\n<p style=\"margin-top: 30px;\">Best regards,<br><strong>The AI Stack Team</strong></p>\n</body></html>",
+        "options": {
+          "replyTo": "hello@theaistack.com"
+        }
+      },
+      "id": "node-gmail-welcome",
+      "name": "Gmail - Send Welcome Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [700, 300],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-cred",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C_LEADS_CHANNEL",
+          "mode": "id"
+        },
+        "messageType": "block",
+        "blocksUi": {
+          "blocksValues": [
+            {
+              "type": "header",
+              "text": {
+                "type": "plain_text",
+                "text": "🔥 New Lead Captured!"
+              }
+            },
+            {
+              "type": "section",
+              "fields": [
+                {
+                  "type": "mrkdwn",
+                  "text": "*Name:*\n{{ $('Validate & Sanitize Lead').item.json.firstName }} {{ $('Validate & Sanitize Lead').item.json.lastName }}"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*Email:*\n{{ $('Validate & Sanitize Lead').item.json.email }}"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*Company:*\n{{ $('Validate & Sanitize Lead').item.json.company || 'Not provided' }}"
+                },
+                {
+                  "type": "mrkdwn",
+                  "text": "*Source:*\n{{ $('Validate & Sanitize Lead').item.json.source }}"
+                }
+              ]
+            },
+            {
+              "type": "section",
+              "text": {
+                "type": "mrkdwn",
+                "text": "*Message:*\n{{ $('Validate & Sanitize Lead').item.json.message || '_No message provided_' }}"
+              }
+            },
+            {
+              "type": "actions",
+              "elements": [
+                {
+                  "type": "button",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "View in HubSpot"
+                  },
+                  "url": "https://app.hubspot.com/contacts/",
+                  "style": "primary"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "id": "node-slack-alert",
+      "name": "Slack - Lead Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [700, 420],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"success\": true, \"message\": \"Lead received successfully\" }"
+      },
+      "id": "node-respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [920, 300]
+    }
+  ],
+  "connections": {
+    "Form Webhook": {
+      "main": [
+        [{ "node": "Validate & Sanitize Lead", "type": "main", "index": 0 }]
+      ]
+    },
+    "Validate & Sanitize Lead": {
+      "main": [
+        [
+          { "node": "HubSpot - Create Contact", "type": "main", "index": 0 },
+          { "node": "Gmail - Send Welcome Email", "type": "main", "index": 0 },
+          { "node": "Slack - Lead Alert", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Gmail - Send Welcome Email": {
+      "main": [
+        [{ "node": "Respond to Webhook", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "tags": [{ "name": "leads" }, { "name": "crm" }, { "name": "sales" }],
+  "meta": {
+    "description": "Routes new leads from web forms to HubSpot CRM, sends a branded welcome email via Gmail, and posts a rich Slack alert to the sales team — all in under 2 seconds.",
+    "prerequisites": [
+      "HubSpot API key with contacts:write scope",
+      "Gmail OAuth2 credentials",
+      "Slack Bot Token with chat:write scope",
+      "n8n webhook URL configured on your form (use the webhook node URL)"
+    ],
+    "testingScenario": {
+      "happy_path": "POST to webhook with {firstName, lastName, email, company, source, message}",
+      "edge_cases": [
+        "Missing email → validation error returned",
+        "Invalid email format → validation error",
+        "HubSpot duplicate contact → check upsert behavior",
+        "Slack channel not found → verify channel ID"
+      ],
+      "test_payload": {
+        "firstName": "Jane",
+        "lastName": "Smith",
+        "email": "jane.smith@acmecorp.com",
+        "company": "Acme Corp",
+        "phone": "+1-555-0100",
+        "source": "website-form",
+        "message": "Interested in AI automation for our sales team"
+      }
+    }
+  }
+}

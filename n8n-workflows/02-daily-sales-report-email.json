@@ -1,0 +1,121 @@
+{
+  "name": "02 - Daily Sales Report → Auto-Emailed at 8 AM",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule - 8AM Weekdays",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Sales Data",
+          "mode": "name"
+        },
+        "options": {
+          "headerRow": 1,
+          "returnAllMatches": true
+        }
+      },
+      "id": "node-gsheets-read",
+      "name": "Google Sheets - Read Sales Data",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [480, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gsheets-cred",
+          "name": "Google Sheets OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\nconst today = new Date();\nconst yesterday = new Date(today);\nyesterday.setDate(yesterday.getDate() - 1);\nconst dateStr = yesterday.toISOString().split('T')[0];\n\n// Filter to yesterday's data\nconst todayRows = rows.filter(row => {\n  const rowDate = row.json['Date'] || row.json['date'] || '';\n  return rowDate.startsWith(dateStr);\n});\n\nconst allRows = todayRows.length > 0 ? todayRows : rows; // fallback to all if no date match\n\nlet totalRevenue = 0;\nlet totalOrders = 0;\nlet totalUnits = 0;\nconst byRep = {};\nconst byProduct = {};\n\nfor (const row of allRows) {\n  const revenue = parseFloat(row.json['Revenue'] || row.json['Amount'] || 0);\n  const orders = parseInt(row.json['Orders'] || 1, 10);\n  const units = parseInt(row.json['Units'] || 1, 10);\n  const rep = row.json['Sales Rep'] || row.json['rep'] || 'Unknown';\n  const product = row.json['Product'] || row.json['product'] || 'Other';\n\n  totalRevenue += revenue;\n  totalOrders += orders;\n  totalUnits += units;\n\n  byRep[rep] = (byRep[rep] || 0) + revenue;\n  byProduct[product] = (byProduct[product] || 0) + revenue;\n}\n\nconst topReps = Object.entries(byRep)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 5)\n  .map(([name, rev]) => `<tr><td style=\"padding:6px 12px;\">${name}</td><td style=\"padding:6px 12px; text-align:right;\">$${rev.toLocaleString('en-US', {minimumFractionDigits:2})}</td></tr>`)\n  .join('');\n\nconst topProducts = Object.entries(byProduct)\n  .sort((a, b) => b[1] - a[1])\n  .slice(0, 5)\n  .map(([name, rev]) => `<tr><td style=\"padding:6px 12px;\">${name}</td><td style=\"padding:6px 12px; text-align:right;\">$${rev.toLocaleString('en-US', {minimumFractionDigits:2})}</td></tr>`)\n  .join('');\n\nconst avgOrderValue = totalOrders > 0 ? (totalRevenue / totalOrders) : 0;\n\nconst reportDate = yesterday.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });\n\nreturn [{\n  json: {\n    reportDate,\n    dateStr,\n    totalRevenue: totalRevenue.toFixed(2),\n    totalOrders,\n    totalUnits,\n    avgOrderValue: avgOrderValue.toFixed(2),\n    topRepsHtml: topReps,\n    topProductsHtml: topProducts,\n    rowCount: allRows.length\n  }\n}];"
+      },
+      "id": "node-calculate",
+      "name": "Code - Calculate Totals & Build Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "sendTo": "leadership@company.com, cfo@company.com, vpsales@company.com",
+        "subject": "📊 Daily Sales Report — {{ $json.reportDate }}",
+        "message": "<html><body style=\"font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; color: #333;\">\n<div style=\"background: linear-gradient(135deg, #1a1a2e, #4f46e5); padding: 24px; border-radius: 8px 8px 0 0;\">\n  <h1 style=\"color: white; margin: 0; font-size: 24px;\">📊 Daily Sales Report</h1>\n  <p style=\"color: #c7d2fe; margin: 8px 0 0;\">{{ $json.reportDate }}</p>\n</div>\n\n<div style=\"background: #f9fafb; padding: 24px; border-radius: 0 0 8px 8px;\">\n\n  <!-- KPI Cards -->\n  <div style=\"display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px;\">\n    <div style=\"background: white; padding: 16px; border-radius: 8px; border-left: 4px solid #4f46e5; box-shadow: 0 1px 3px rgba(0,0,0,0.1);\">\n      <p style=\"margin: 0; color: #6b7280; font-size: 12px; text-transform: uppercase;\">Total Revenue</p>\n      <p style=\"margin: 8px 0 0; font-size: 28px; font-weight: bold; color: #1a1a2e;\">${{ $json.totalRevenue }}</p>\n    </div>\n    <div style=\"background: white; padding: 16px; border-radius: 8px; border-left: 4px solid #10b981; box-shadow: 0 1px 3px rgba(0,0,0,0.1);\">\n      <p style=\"margin: 0; color: #6b7280; font-size: 12px; text-transform: uppercase;\">Total Orders</p>\n      <p style=\"margin: 8px 0 0; font-size: 28px; font-weight: bold; color: #1a1a2e;\">{{ $json.totalOrders }}</p>\n    </div>\n    <div style=\"background: white; padding: 16px; border-radius: 8px; border-left: 4px solid #f59e0b; box-shadow: 0 1px 3px rgba(0,0,0,0.1);\">\n      <p style=\"margin: 0; color: #6b7280; font-size: 12px; text-transform: uppercase;\">Avg Order Value</p>\n      <p style=\"margin: 8px 0 0; font-size: 28px; font-weight: bold; color: #1a1a2e;\">${{ $json.avgOrderValue }}</p>\n    </div>\n  </div>\n\n  <!-- Top Reps Table -->\n  <h3 style=\"color: #1a1a2e; border-bottom: 2px solid #e5e7eb; padding-bottom: 8px;\">🏆 Top Sales Reps</h3>\n  <table style=\"width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);\">\n    <thead><tr style=\"background: #4f46e5; color: white;\">\n      <th style=\"padding: 10px 12px; text-align: left;\">Rep</th>\n      <th style=\"padding: 10px 12px; text-align: right;\">Revenue</th>\n    </tr></thead>\n    <tbody>{{ $json.topRepsHtml }}</tbody>\n  </table>\n\n  <!-- Top Products Table -->\n  <h3 style=\"color: #1a1a2e; border-bottom: 2px solid #e5e7eb; padding-bottom: 8px; margin-top: 24px;\">📦 Top Products</h3>\n  <table style=\"width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.1);\">\n    <thead><tr style=\"background: #10b981; color: white;\">\n      <th style=\"padding: 10px 12px; text-align: left;\">Product</th>\n      <th style=\"padding: 10px 12px; text-align: right;\">Revenue</th>\n    </tr></thead>\n    <tbody>{{ $json.topProductsHtml }}</tbody>\n  </table>\n\n  <p style=\"margin-top: 24px; color: #6b7280; font-size: 12px;\">Generated automatically by n8n • Data from {{ $json.rowCount }} transactions • {{ $json.dateStr }}</p>\n</div>\n</body></html>",
+        "options": {}
+      },
+      "id": "node-gmail-report",
+      "name": "Gmail - Email Daily Report",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [920, 300],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gmail-cred",
+          "name": "Gmail OAuth2"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule - 8AM Weekdays": {
+      "main": [
+        [{ "node": "Google Sheets - Read Sales Data", "type": "main", "index": 0 }]
+      ]
+    },
+    "Google Sheets - Read Sales Data": {
+      "main": [
+        [{ "node": "Code - Calculate Totals & Build Report", "type": "main", "index": 0 }]
+      ]
+    },
+    "Code - Calculate Totals & Build Report": {
+      "main": [
+        [{ "node": "Gmail - Email Daily Report", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "reporting" }, { "name": "sales" }, { "name": "scheduled" }],
+  "meta": {
+    "description": "Every weekday at 8 AM, pulls previous day's sales data from Google Sheets, calculates revenue totals/rankings via Code node, and emails a formatted HTML report to leadership.",
+    "prerequisites": [
+      "Google Sheets OAuth2 credentials",
+      "Gmail OAuth2 credentials",
+      "Google Sheet with columns: Date, Revenue, Orders, Units, Sales Rep, Product",
+      "Update SPREADSHEET_ID and sheet name in the Sheets node",
+      "Update recipient emails in Gmail node"
+    ],
+    "testingScenario": {
+      "happy_path": "Manually trigger workflow; verify email received with correct totals",
+      "edge_cases": [
+        "Empty sheet → report shows $0.00",
+        "No data for yesterday → falls back to all rows",
+        "Large dataset (1000+ rows) → check execution timeout",
+        "Missing columns → code handles gracefully with defaults"
+      ],
+      "sheet_columns": ["Date (YYYY-MM-DD)", "Revenue", "Orders", "Units", "Sales Rep", "Product"]
+    }
+  }
+}

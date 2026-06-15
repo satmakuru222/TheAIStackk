@@ -1,0 +1,231 @@
+{
+  "name": "14 - AI Meeting Notes → Action Items → Notion",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "meeting-notes",
+        "responseMode": "responseNode",
+        "options": {
+          "binaryData": true
+        }
+      },
+      "id": "node-webhook",
+      "name": "Webhook - Audio/Notes Upload",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first();\nconst body = item.json.body || item.json;\n\n// Check if this is audio upload (binary) or text transcript\nconst hasBinary = item.binary && Object.keys(item.binary).length > 0;\nconst hasTextTranscript = body.transcript || body.text;\n\nreturn [{\n  json: {\n    meetingTitle: body.title || body.meetingTitle || 'Meeting Notes',\n    meetingDate: body.date || new Date().toISOString().split('T')[0],\n    attendees: body.attendees || body.participants || '',\n    project: body.project || '',\n    submittedBy: body.submittedBy || body.email || '',\n    inputType: hasBinary ? 'audio' : 'text',\n    textTranscript: hasTextTranscript ? (body.transcript || body.text) : null\n  },\n  binary: item.binary || {}\n}];"
+      },
+      "id": "node-parse-input",
+      "name": "Code - Parse Input Type",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.inputType }}",
+              "rightValue": "audio",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "node-if-audio",
+      "name": "IF - Audio Input?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/audio/transcriptions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env['OPENAI_API_KEY'] }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "model", "value": "whisper-1" },
+            { "name": "language", "value": "en" },
+            { "name": "response_format", "value": "verbose_json" },
+            { "name": "timestamp_granularities[]", "value": "segment" }
+          ]
+        },
+        "options": {
+          "bodyContentType": "multipart-form-data"
+        }
+      },
+      "id": "node-whisper",
+      "name": "HTTP - Whisper Transcription",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [920, 180]
+    },
+    {
+      "parameters": {
+        "jsCode": "const parsed = $('Code - Parse Input Type').first().json;\nconst whisperResult = $input.first().json;\n\nconst transcript = whisperResult.text || parsed.textTranscript || 'No transcript available';\nconst duration = whisperResult.duration ? `${Math.round(whisperResult.duration / 60)} minutes` : 'Unknown';\n\nreturn [{\n  json: {\n    ...parsed,\n    transcript,\n    duration\n  }\n}];"
+      },
+      "id": "node-merge-transcript",
+      "name": "Code - Merge Transcript",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1140, 300]
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "message",
+        "modelId": { "__rl": true, "value": "gpt-4o", "mode": "list" },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are an expert meeting facilitator and note-taker. Analyze the meeting transcript and produce structured output.\n\nReturn a JSON object with:\n{\n  \"summary\": \"2-3 paragraph executive summary of the meeting\",\n  \"key_decisions\": [\"Decision 1\", \"Decision 2\"],\n  \"action_items\": [\n    {\n      \"task\": \"Clear task description\",\n      \"owner\": \"Person's name (or 'TBD')\",\n      \"due_date\": \"YYYY-MM-DD or 'No date set'\",\n      \"priority\": \"High|Medium|Low\"\n    }\n  ],\n  \"blockers\": [\"Blocker 1\"],\n  \"topics_discussed\": [\"Topic 1\", \"Topic 2\"],\n  \"next_meeting\": \"Date/time if mentioned, or 'Not scheduled'\"\n}\n\nBe specific and actionable. Extract real names from the transcript for task owners."
+            },
+            {
+              "role": "user",
+              "content": "Meeting: {{ $json.meetingTitle }}\nDate: {{ $json.meetingDate }}\nAttendees: {{ $json.attendees }}\nProject: {{ $json.project }}\nDuration: {{ $json.duration }}\n\nTranscript:\n{{ $json.transcript }}"
+            }
+          ]
+        },
+        "options": { "temperature": 0.3, "maxTokens": 2000 }
+      },
+      "id": "node-gpt-analyze",
+      "name": "GPT-4o - Analyze Meeting",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.7,
+      "position": [1360, 300],
+      "credentials": { "openAiApi": { "id": "openai-cred", "name": "OpenAI API" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const meetingData = $('Code - Merge Transcript').first().json;\nconst aiRaw = $input.first().json.message?.content || '{}';\n\nlet analysis;\ntry { analysis = JSON.parse(aiRaw); }\ncatch (e) { analysis = { summary: aiRaw, key_decisions: [], action_items: [], blockers: [], topics_discussed: [], next_meeting: 'Not scheduled' }; }\n\n// Build Notion page blocks\nconst actionItemsBlocks = (analysis.action_items || []).map(item =>\n  `☐ **${item.task}** — Owner: ${item.owner} | Due: ${item.due_date} | Priority: ${item.priority}`\n).join('\\n');\n\nconst decisionsText = (analysis.key_decisions || []).map(d => `• ${d}`).join('\\n');\nconst blockersText = (analysis.blockers || []).map(b => `⚠️ ${b}`).join('\\n');\nconst topicsText = (analysis.topics_discussed || []).map(t => `• ${t}`).join('\\n');\n\nreturn [{\n  json: {\n    ...meetingData,\n    analysis,\n    actionItemsBlocks,\n    decisionsText,\n    blockersText,\n    topicsText,\n    pageTitle: `${meetingData.meetingDate} — ${meetingData.meetingTitle}`\n  }\n}];"
+      },
+      "id": "node-parse-analysis",
+      "name": "Code - Parse & Format Analysis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1580, 300]
+    },
+    {
+      "parameters": {
+        "resource": "page",
+        "operation": "create",
+        "databaseId": { "__rl": true, "value": "YOUR_NOTION_MEETINGS_DB", "mode": "id" },
+        "title": "={{ $json.pageTitle }}",
+        "propertiesUi": {
+          "propertyValues": [
+            { "key": "Date", "type": "date", "date": "={{ $json.meetingDate }}" },
+            { "key": "Project", "type": "rich_text", "textContent": "={{ $json.project }}" },
+            { "key": "Attendees", "type": "rich_text", "textContent": "={{ $json.attendees }}" },
+            { "key": "Duration", "type": "rich_text", "textContent": "={{ $json.duration }}" },
+            { "key": "Action Items Count", "type": "number", "numberValue": "={{ ($json.analysis.action_items || []).length }}" },
+            { "key": "Next Meeting", "type": "rich_text", "textContent": "={{ $json.analysis.next_meeting }}" }
+          ]
+        },
+        "blockUi": {
+          "blockValues": [
+            { "type": "heading_2", "textContent": "📋 Summary" },
+            { "type": "paragraph", "textContent": "={{ $json.analysis.summary }}" },
+            { "type": "divider" },
+            { "type": "heading_2", "textContent": "✅ Action Items" },
+            { "type": "paragraph", "textContent": "={{ $json.actionItemsBlocks }}" },
+            { "type": "divider" },
+            { "type": "heading_2", "textContent": "🎯 Key Decisions" },
+            { "type": "paragraph", "textContent": "={{ $json.decisionsText }}" },
+            { "type": "heading_2", "textContent": "🔵 Topics Discussed" },
+            { "type": "paragraph", "textContent": "={{ $json.topicsText }}" },
+            { "type": "heading_2", "textContent": "⚠️ Blockers & Risks" },
+            { "type": "paragraph", "textContent": "={{ $json.blockersText || 'None identified' }}" },
+            { "type": "divider" },
+            { "type": "heading_2", "textContent": "📝 Full Transcript" },
+            { "type": "paragraph", "textContent": "={{ $json.transcript }}" }
+          ]
+        }
+      },
+      "id": "node-notion-create",
+      "name": "Notion - Create Meeting Page",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [1800, 300],
+      "credentials": { "notionApi": { "id": "notion-cred", "name": "Notion API" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"notionUrl\": \"{{ $json.url }}\",\n  \"actionItems\": {{ $('Code - Parse & Format Analysis').item.json.analysis.action_items?.length || 0 }},\n  \"message\": \"Meeting notes processed and saved to Notion\"\n}"
+      },
+      "id": "node-respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2020, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Audio/Notes Upload": {
+      "main": [[{ "node": "Code - Parse Input Type", "type": "main", "index": 0 }]]
+    },
+    "Code - Parse Input Type": {
+      "main": [[{ "node": "IF - Audio Input?", "type": "main", "index": 0 }]]
+    },
+    "IF - Audio Input?": {
+      "main": [
+        [{ "node": "HTTP - Whisper Transcription", "type": "main", "index": 0 }],
+        [{ "node": "Code - Merge Transcript", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP - Whisper Transcription": {
+      "main": [[{ "node": "Code - Merge Transcript", "type": "main", "index": 0 }]]
+    },
+    "Code - Merge Transcript": {
+      "main": [[{ "node": "GPT-4o - Analyze Meeting", "type": "main", "index": 0 }]]
+    },
+    "GPT-4o - Analyze Meeting": {
+      "main": [[{ "node": "Code - Parse & Format Analysis", "type": "main", "index": 0 }]]
+    },
+    "Code - Parse & Format Analysis": {
+      "main": [[{ "node": "Notion - Create Meeting Page", "type": "main", "index": 0 }]]
+    },
+    "Notion - Create Meeting Page": {
+      "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "meetings" }, { "name": "ai" }, { "name": "notion" }, { "name": "productivity" }],
+  "meta": {
+    "description": "Upload audio recording or text transcript via webhook → Whisper transcribes audio → GPT-4o extracts summary/action items/decisions → creates structured Notion page with full transcript and formatted action items.",
+    "prerequisites": [
+      "OpenAI API key (Whisper + GPT-4o)",
+      "Notion integration with meetings database access",
+      "Notion database with: Date, Project, Attendees, Duration, Action Items Count (number), Next Meeting",
+      "Set OPENAI_API_KEY env variable",
+      "Audio formats supported by Whisper: mp3, mp4, wav, m4a, webm (max 25MB)"
+    ],
+    "testingScenario": {
+      "text_test_payload": {
+        "title": "Q2 Planning",
+        "date": "2026-06-13",
+        "attendees": "Santoshi, Alex, Jordan",
+        "project": "The AI Stack",
+        "transcript": "Santoshi: Let's discuss the Q2 roadmap. Alex: I think we need to prioritize the newsletter automation. Jordan: Agreed. I'll own that by June 20th. Santoshi: Great. Let's also fix the lead routing bug. Jordan can handle that too, due June 17th. Any blockers? Alex: We're waiting on API keys from Beehiiv. That's blocking the newsletter work. Next meeting: June 20th 10 AM."
+      }
+    }
+  }
+}

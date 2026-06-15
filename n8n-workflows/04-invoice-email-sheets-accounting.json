@@ -1,0 +1,174 @@
+{
+  "name": "04 - Invoice Email → Google Sheets Accounting",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": { "item": [{ "mode": "everyMinute" }] },
+        "filters": {
+          "q": "subject:(invoice OR \"payment due\" OR \"receipt\" OR \"order confirmation\") has:attachment newer_than:1d",
+          "readStatus": "unread"
+        },
+        "options": {
+          "attachmentsBinary": true,
+          "downloadAttachments": true
+        }
+      },
+      "id": "node-gmail-trigger",
+      "name": "Gmail - Monitor Invoice Emails",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 300],
+      "credentials": {
+        "gmailOAuth2": { "id": "gmail-cred", "name": "Gmail OAuth2" }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const email = $input.first().json;\n\n// Extract invoice data from email body\nconst body = email.text || email.snippet || email.body || '';\nconst subject = email.subject || '';\nconst from = email.from || '';\nconst date = email.date || new Date().toISOString();\n\n// Amount patterns: $1,234.56 / USD 1234.56 / 1,234.56 USD / Total: 1234.56\nconst amountPatterns = [\n  /\\$([\\d,]+\\.\\d{2})/g,\n  /USD\\s*([\\d,]+\\.\\d{2})/gi,\n  /([\\d,]+\\.\\d{2})\\s*USD/gi,\n  /total[:\\s]+\\$?([\\d,]+\\.\\d{2})/gi,\n  /amount[:\\s]+\\$?([\\d,]+\\.\\d{2})/gi,\n  /invoice[\\s\\w]*:\\s*\\$?([\\d,]+\\.\\d{2})/gi\n];\n\nconst amounts = [];\nfor (const pattern of amountPatterns) {\n  let match;\n  while ((match = pattern.exec(body)) !== null) {\n    const num = parseFloat(match[1].replace(/,/g, ''));\n    if (!isNaN(num) && num > 0) amounts.push(num);\n  }\n}\n\nconst maxAmount = amounts.length > 0 ? Math.max(...amounts) : 0;\n\n// Invoice number patterns\nconst invPattern = /(?:invoice|inv|#)\\s*[#:]?\\s*([A-Z0-9\\-]{4,20})/i;\nconst invMatch = (body + ' ' + subject).match(invPattern);\nconst invoiceNumber = invMatch ? invMatch[1] : `AUTO-${Date.now()}`;\n\n// Vendor from email\nconst vendorMatch = from.match(/^(.+?)\\s*</);\nconst vendor = vendorMatch ? vendorMatch[1].replace(/\"/g, '').trim() : from.split('@')[0];\n\n// Due date patterns\nconst dueDatePatterns = [\n  /due\\s+(?:by|on|date)[:\\s]+([\\w\\s,]+\\d{4})/i,\n  /payment\\s+due[:\\s]+([\\w\\s,]+\\d{4})/i\n];\nlet dueDate = '';\nfor (const p of dueDatePatterns) {\n  const m = body.match(p);\n  if (m) { dueDate = m[1].trim().substring(0, 30); break; }\n}\n\nreturn [{\n  json: {\n    invoiceNumber,\n    vendor,\n    fromEmail: from,\n    subject,\n    amount: maxAmount,\n    amountFormatted: maxAmount.toLocaleString('en-US', { style: 'currency', currency: 'USD' }),\n    dueDate,\n    emailDate: new Date(date).toLocaleDateString('en-US'),\n    isHighValue: maxAmount >= 1000,\n    emailId: email.id,\n    snippet: body.substring(0, 200)\n  }\n}];"
+      },
+      "id": "node-extract",
+      "name": "Code - Extract Invoice Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_ACCOUNTING_SPREADSHEET_ID",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Invoices",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date Received": "={{ $json.emailDate }}",
+            "Invoice Number": "={{ $json.invoiceNumber }}",
+            "Vendor": "={{ $json.vendor }}",
+            "Vendor Email": "={{ $json.fromEmail }}",
+            "Amount": "={{ $json.amount }}",
+            "Due Date": "={{ $json.dueDate }}",
+            "Status": "Pending",
+            "Subject": "={{ $json.subject }}",
+            "High Value": "={{ $json.isHighValue ? 'YES' : 'NO' }}",
+            "Email ID": "={{ $json.emailId }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-sheets-log",
+      "name": "Google Sheets - Log Invoice",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [700, 300],
+      "credentials": {
+        "googleSheetsOAuth2Api": { "id": "gsheets-cred", "name": "Google Sheets OAuth2" }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "high-value-check",
+              "leftValue": "={{ $json.isHighValue }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-if-highvalue",
+      "name": "IF - High Value (≥$1000)?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C_FINANCE_CHANNEL", "mode": "id" },
+        "messageType": "block",
+        "blocksUi": {
+          "blocksValues": [
+            {
+              "type": "header",
+              "text": { "type": "plain_text", "text": "🚨 High-Value Invoice Alert!" }
+            },
+            {
+              "type": "section",
+              "fields": [
+                { "type": "mrkdwn", "text": "*Invoice #:* {{ $json.invoiceNumber }}" },
+                { "type": "mrkdwn", "text": "*Amount:* {{ $json.amountFormatted }}" },
+                { "type": "mrkdwn", "text": "*Vendor:* {{ $json.vendor }}" },
+                { "type": "mrkdwn", "text": "*Due Date:* {{ $json.dueDate || 'Not specified' }}" }
+              ]
+            },
+            {
+              "type": "section",
+              "text": { "type": "mrkdwn", "text": "*Subject:* {{ $json.subject }}\n*From:* {{ $json.fromEmail }}" }
+            },
+            {
+              "type": "context",
+              "elements": [{ "type": "mrkdwn", "text": "Logged to Google Sheets Accounting • Requires approval for payment" }]
+            }
+          ]
+        }
+      },
+      "id": "node-slack-alert",
+      "name": "Slack - High Value Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1140, 180],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack API" } }
+    }
+  ],
+  "connections": {
+    "Gmail - Monitor Invoice Emails": {
+      "main": [[{ "node": "Code - Extract Invoice Data", "type": "main", "index": 0 }]]
+    },
+    "Code - Extract Invoice Data": {
+      "main": [[{ "node": "Google Sheets - Log Invoice", "type": "main", "index": 0 }]]
+    },
+    "Google Sheets - Log Invoice": {
+      "main": [[{ "node": "IF - High Value (≥$1000)?", "type": "main", "index": 0 }]]
+    },
+    "IF - High Value (≥$1000)?": {
+      "main": [
+        [{ "node": "Slack - High Value Alert", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "accounting" }, { "name": "invoices" }, { "name": "finance" }],
+  "meta": {
+    "description": "Monitors Gmail for invoice/receipt emails, extracts amounts using regex patterns, logs to a Google Sheets accounting ledger, and alerts the finance Slack channel for invoices ≥$1,000.",
+    "prerequisites": [
+      "Gmail OAuth2 with mail.readonly and gmail.modify scopes",
+      "Google Sheets OAuth2",
+      "Slack Bot Token",
+      "Google Sheet named 'Invoices' with columns: Date Received, Invoice Number, Vendor, Vendor Email, Amount, Due Date, Status, Subject, High Value, Email ID",
+      "Update ACCOUNTING_SPREADSHEET_ID",
+      "Adjust high-value threshold in IF node (default: $1,000)"
+    ],
+    "testingScenario": {
+      "happy_path": "Forward a PDF invoice email; check Sheets row created, Slack alert if ≥$1000",
+      "edge_cases": [
+        "Email with no dollar amount → amount = 0, still logged",
+        "Multiple amounts → takes the maximum",
+        "Non-invoice email matching filter → logs with 0 amount",
+        "Duplicate invoice number → append still works, no dedup"
+      ]
+    }
+  }
+}

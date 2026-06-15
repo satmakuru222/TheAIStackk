@@ -1,0 +1,188 @@
+{
+  "name": "10 - Weekly AI Newsletter Auto-Draft",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 7 * * 1" }]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule - Monday 7AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 400]
+    },
+    {
+      "parameters": {
+        "url": "https://feeds.feedburner.com/TechCrunch",
+        "options": {}
+      },
+      "id": "node-rss-1",
+      "name": "RSS - TechCrunch AI",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [480, 220]
+    },
+    {
+      "parameters": {
+        "url": "https://www.artificialintelligence-news.com/feed/",
+        "options": {}
+      },
+      "id": "node-rss-2",
+      "name": "RSS - AI News",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [480, 360]
+    },
+    {
+      "parameters": {
+        "url": "https://venturebeat.com/category/ai/feed/",
+        "options": {}
+      },
+      "id": "node-rss-3",
+      "name": "RSS - VentureBeat AI",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [480, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge and deduplicate RSS items from all feeds\nconst allItems = $input.all();\nconst sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);\n\nconst seen = new Set();\nconst articles = [];\n\nfor (const item of allItems) {\n  const j = item.json;\n  const title = (j.title || '').trim();\n  if (!title || seen.has(title.toLowerCase())) continue;\n  \n  const pubDate = new Date(j.pubDate || j.isoDate || 0);\n  if (pubDate < sevenDaysAgo) continue;\n  \n  seen.add(title.toLowerCase());\n  articles.push({\n    title,\n    link: j.link || '',\n    summary: (j.contentSnippet || j.summary || '').substring(0, 400),\n    pubDate: pubDate.toLocaleDateString('en-US'),\n    source: j.feedUrl?.includes('techcrunch') ? 'TechCrunch' : j.feedUrl?.includes('venturebeat') ? 'VentureBeat' : 'AI News'\n  });\n}\n\n// Sort by date, take top 10\nconst top10 = articles.slice(0, 10);\n\nconst articlesList = top10.map((a, i) =>\n  `${i + 1}. [${a.source}] ${a.title}\\nURL: ${a.link}\\nSummary: ${a.summary}\\n`\n).join('\\n');\n\nreturn [{ json: { articles: top10, articlesList, count: top10.length } }];"
+      },
+      "id": "node-merge-articles",
+      "name": "Code - Merge & Filter Articles",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 400]
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "message",
+        "modelId": { "__rl": true, "value": "gpt-4o", "mode": "list" },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are the editor of 'The AI Stack Weekly', a newsletter for business professionals who want to leverage AI without getting lost in hype. Your voice is: authoritative but accessible, practical, slightly opinionated, no fluff.\n\nWrite a complete newsletter issue in HTML email format with:\n1. A catchy subject line suggestion\n2. A brief 2-3 sentence intro that sets the week's theme\n3. 5-7 curated article summaries with your expert commentary (2-3 sentences each, add your take on why it matters)\n4. A 'Tool of the Week' section highlighting one practical AI tool\n5. A brief 'Closing Take' - one actionable insight\n6. Professional sign-off\n\nUse inline CSS for styling. Make it scannable with clear sections. Return JSON: {\"subject\": \"...\", \"html\": \"...full HTML email body...\"}"
+            },
+            {
+              "role": "user",
+              "content": "Here are this week's top AI articles to curate:\n\n{{ $json.articlesList }}\n\nWeek ending: {{ new Date().toLocaleDateString('en-US', {weekday:'long', year:'numeric', month:'long', day:'numeric'}) }}"
+            }
+          ]
+        },
+        "options": { "temperature": 0.8, "maxTokens": 4000 }
+      },
+      "id": "node-gpt-draft",
+      "name": "GPT-4o - Draft Newsletter",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.7,
+      "position": [920, 400],
+      "credentials": { "openAiApi": { "id": "openai-cred", "name": "OpenAI API" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rawContent = $input.first().json.message?.content || '{}';\nlet newsletter;\ntry {\n  newsletter = JSON.parse(rawContent);\n} catch (e) {\n  // If not valid JSON, treat as raw HTML\n  newsletter = { subject: 'The AI Stack Weekly — Week of ' + new Date().toLocaleDateString(), html: rawContent };\n}\n\nreturn [{\n  json: {\n    subject: newsletter.subject || 'The AI Stack Weekly',\n    htmlBody: newsletter.html || rawContent,\n    draftedAt: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-parse-newsletter",
+      "name": "Code - Parse Newsletter Draft",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1140, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.beehiiv.com/v2/publications/{{ $env['BEEHIIV_PUBLICATION_ID'] }}/posts",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env['BEEHIIV_API_KEY'] }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"subject\": {{ JSON.stringify($json.subject) }},\n  \"content\": {\n    \"free\": {\n      \"email\": {{ JSON.stringify($json.htmlBody) }},\n      \"web\": {{ JSON.stringify($json.htmlBody) }}\n    }\n  },\n  \"status\": \"draft\",\n  \"audience\": \"free\",\n  \"send_at\": null,\n  \"meta_default_description\": \"Your weekly AI automation briefing from The AI Stack\"\n}",
+        "options": {}
+      },
+      "id": "node-beehiiv",
+      "name": "HTTP - Create Beehiiv Draft",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1360, 300]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C_CONTENT_CHANNEL", "mode": "id" },
+        "messageType": "text",
+        "text": "📰 *Weekly Newsletter Draft Created!*\n\n*Subject:* {{ $('Code - Parse Newsletter Draft').item.json.subject }}\n\nThe draft has been created in Beehiiv. Review and schedule before sending.\n🔗 https://app.beehiiv.com/posts"
+      },
+      "id": "node-slack-notify",
+      "name": "Slack - Draft Ready Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [1360, 500],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack API" } }
+    }
+  ],
+  "connections": {
+    "Schedule - Monday 7AM": {
+      "main": [
+        [
+          { "node": "RSS - TechCrunch AI", "type": "main", "index": 0 },
+          { "node": "RSS - AI News", "type": "main", "index": 0 },
+          { "node": "RSS - VentureBeat AI", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "RSS - TechCrunch AI": {
+      "main": [[{ "node": "Code - Merge & Filter Articles", "type": "main", "index": 0 }]]
+    },
+    "RSS - AI News": {
+      "main": [[{ "node": "Code - Merge & Filter Articles", "type": "main", "index": 0 }]]
+    },
+    "RSS - VentureBeat AI": {
+      "main": [[{ "node": "Code - Merge & Filter Articles", "type": "main", "index": 0 }]]
+    },
+    "Code - Merge & Filter Articles": {
+      "main": [[{ "node": "GPT-4o - Draft Newsletter", "type": "main", "index": 0 }]]
+    },
+    "GPT-4o - Draft Newsletter": {
+      "main": [[{ "node": "Code - Parse Newsletter Draft", "type": "main", "index": 0 }]]
+    },
+    "Code - Parse Newsletter Draft": {
+      "main": [
+        [
+          { "node": "HTTP - Create Beehiiv Draft", "type": "main", "index": 0 },
+          { "node": "Slack - Draft Ready Notification", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "newsletter" }, { "name": "content" }, { "name": "ai" }, { "name": "scheduled" }],
+  "meta": {
+    "description": "Every Monday at 7AM: pulls articles from 3 AI RSS feeds, deduplicates and filters to past week, feeds top 10 to GPT-4o to write a complete branded newsletter, creates a draft in Beehiiv, and notifies Slack for human review before sending.",
+    "prerequisites": [
+      "OpenAI API key (GPT-4o access)",
+      "Beehiiv account with API access (Creator plan+)",
+      "Slack Bot Token",
+      "Set env variables: BEEHIIV_API_KEY, BEEHIIV_PUBLICATION_ID",
+      "Update RSS feed URLs to your preferred AI sources"
+    ],
+    "testingScenario": {
+      "happy_path": "Manual trigger → verify articles fetched, GPT draft created, Beehiiv draft appears in dashboard",
+      "edge_cases": [
+        "RSS feed returns no articles → empty articlesList sent to GPT (it will hallucinate - add length check)",
+        "GPT response not valid JSON → fallback handles it",
+        "Beehiiv API rate limit → 429 error, add wait/retry",
+        "Newsletter HTML too long → Beehiiv may truncate at 100k chars"
+      ]
+    }
+  }
+}

@@ -1,0 +1,186 @@
+{
+  "name": "11 - Form → PDF Generator → Email",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "generate-pdf",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "Webhook - Form Submission",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\n\n// Template type determines which PDF layout to generate\nconst templateType = body.template || 'invoice';\n\n// Build HTML based on template type\nlet htmlContent = '';\nconst now = new Date();\nconst dateStr = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });\n\nif (templateType === 'invoice') {\n  const items = body.items || [{ description: 'Service', quantity: 1, price: 100 }];\n  const subtotal = items.reduce((s, i) => s + (i.quantity * i.price), 0);\n  const tax = subtotal * (body.taxRate || 0.1);\n  const total = subtotal + tax;\n\n  const itemRows = items.map(item =>\n    `<tr>\n      <td style=\"padding:10px; border-bottom:1px solid #e5e7eb;\">${item.description}</td>\n      <td style=\"padding:10px; border-bottom:1px solid #e5e7eb; text-align:center;\">${item.quantity}</td>\n      <td style=\"padding:10px; border-bottom:1px solid #e5e7eb; text-align:right;\">$${parseFloat(item.price).toFixed(2)}</td>\n      <td style=\"padding:10px; border-bottom:1px solid #e5e7eb; text-align:right;\">$${(item.quantity * item.price).toFixed(2)}</td>\n    </tr>`\n  ).join('');\n\n  htmlContent = `<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><title>Invoice ${body.invoiceNumber || 'INV-001'}</title></head>\n<body style=\"font-family: Arial, sans-serif; margin: 40px; color: #333;\">\n  <div style=\"display:flex; justify-content:space-between; align-items:start; margin-bottom:40px;\">\n    <div>\n      <h1 style=\"color:#4f46e5; margin:0;\">INVOICE</h1>\n      <p style=\"color:#6b7280; margin:4px 0;\">Invoice #: ${body.invoiceNumber || 'INV-001'}</p>\n      <p style=\"color:#6b7280; margin:4px 0;\">Date: ${dateStr}</p>\n      <p style=\"color:#6b7280; margin:4px 0;\">Due: ${body.dueDate || 'Net 30'}</p>\n    </div>\n    <div style=\"text-align:right;\">\n      <h2 style=\"margin:0; color:#1a1a2e;\">${body.companyName || 'Your Company'}</h2>\n      <p style=\"margin:4px 0; color:#6b7280;\">${body.companyAddress || ''}</p>\n      <p style=\"margin:4px 0; color:#6b7280;\">${body.companyEmail || ''}</p>\n    </div>\n  </div>\n  <div style=\"background:#f9fafb; padding:16px; border-radius:8px; margin-bottom:24px;\">\n    <h3 style=\"margin:0 0 8px;\">Bill To:</h3>\n    <p style=\"margin:2px 0;\">${body.clientName || ''}</p>\n    <p style=\"margin:2px 0;\">${body.clientAddress || ''}</p>\n    <p style=\"margin:2px 0;\">${body.clientEmail || ''}</p>\n  </div>\n  <table style=\"width:100%; border-collapse:collapse;\">\n    <thead><tr style=\"background:#4f46e5; color:white;\">\n      <th style=\"padding:10px; text-align:left;\">Description</th>\n      <th style=\"padding:10px; text-align:center;\">Qty</th>\n      <th style=\"padding:10px; text-align:right;\">Rate</th>\n      <th style=\"padding:10px; text-align:right;\">Amount</th>\n    </tr></thead>\n    <tbody>${itemRows}</tbody>\n  </table>\n  <div style=\"text-align:right; margin-top:16px;\">\n    <p>Subtotal: <strong>$${subtotal.toFixed(2)}</strong></p>\n    <p>Tax (${((body.taxRate || 0.1)*100).toFixed(0)}%): <strong>$${tax.toFixed(2)}</strong></p>\n    <p style=\"font-size:1.5em; color:#4f46e5;\">Total: <strong>$${total.toFixed(2)}</strong></p>\n  </div>\n  ${body.notes ? `<div style=\"margin-top:24px; padding:16px; background:#fffbeb; border-radius:8px;\"><strong>Notes:</strong><br>${body.notes}</div>` : ''}\n</body></html>`;\n\n  return [{ json: { htmlContent, templateType, recipientEmail: body.clientEmail || body.email, recipientName: body.clientName || 'Client', subject: `Invoice ${body.invoiceNumber || 'INV-001'} from ${body.companyName || 'Us'}`, filename: `Invoice-${body.invoiceNumber || 'INV-001'}.pdf` } }];\n}\n\n// Default: simple report template\nhtmlContent = `<!DOCTYPE html><html><body style=\"font-family:Arial,sans-serif; margin:40px;\">\n<h1>${body.title || 'Report'}</h1><p>Generated: ${dateStr}</p>\n<div>${body.content || 'No content provided.'}</div>\n</body></html>`;\n\nreturn [{ json: { htmlContent, templateType, recipientEmail: body.email, recipientName: body.name || 'Recipient', subject: body.emailSubject || 'Your PDF is ready', filename: 'document.pdf' } }];"
+      },
+      "id": "node-build-html",
+      "name": "Code - Build PDF HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.pdfmonkey.io/api/v1/documents",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env['PDFMONKEY_API_KEY'] }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"document\": {\n    \"document_template_id\": \"{{ $env['PDFMONKEY_TEMPLATE_ID'] || 'html' }}\",\n    \"status\": \"pending\",\n    \"payload\": {\n      \"html\": {{ JSON.stringify($json.htmlContent) }}\n    },\n    \"meta\": {\n      \"filename\": {{ JSON.stringify($json.filename) }}\n    }\n  }\n}",
+        "options": {}
+      },
+      "id": "node-pdf-create",
+      "name": "HTTP - PDFMonkey Create Document",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "seconds"
+      },
+      "id": "node-wait",
+      "name": "Wait - PDF Generation",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [920, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.pdfmonkey.io/api/v1/documents/{{ $('HTTP - PDFMonkey Create Document').item.json.document.id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "Bearer {{ $env['PDFMONKEY_API_KEY'] }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-pdf-poll",
+      "name": "HTTP - PDFMonkey Get Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1140, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.document.download_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "node-download-pdf",
+      "name": "HTTP - Download PDF Binary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1360, 300]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Code - Build PDF HTML').item.json.recipientEmail }}",
+        "subject": "={{ $('Code - Build PDF HTML').item.json.subject }}",
+        "message": "<p>Dear {{ $('Code - Build PDF HTML').item.json.recipientName }},</p>\n<p>Please find your document attached.</p>\n<p>If you have any questions, please don't hesitate to reach out.</p>\n<p>Best regards,<br>The Team</p>",
+        "options": {
+          "attachmentsUi": {
+            "attachmentsBinary": [
+              {
+                "property": "data",
+                "filename": "={{ $('Code - Build PDF HTML').item.json.filename }}"
+              }
+            ]
+          }
+        }
+      },
+      "id": "node-gmail-send",
+      "name": "Gmail - Send PDF Email",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [1580, 300],
+      "credentials": { "gmailOAuth2": { "id": "gmail-cred", "name": "Gmail OAuth2" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"success\": true, \"message\": \"PDF generated and emailed to {{ $('Code - Build PDF HTML').item.json.recipientEmail }}\" }"
+      },
+      "id": "node-respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1580, 460]
+    }
+  ],
+  "connections": {
+    "Webhook - Form Submission": {
+      "main": [[{ "node": "Code - Build PDF HTML", "type": "main", "index": 0 }]]
+    },
+    "Code - Build PDF HTML": {
+      "main": [[{ "node": "HTTP - PDFMonkey Create Document", "type": "main", "index": 0 }]]
+    },
+    "HTTP - PDFMonkey Create Document": {
+      "main": [[{ "node": "Wait - PDF Generation", "type": "main", "index": 0 }]]
+    },
+    "Wait - PDF Generation": {
+      "main": [[{ "node": "HTTP - PDFMonkey Get Status", "type": "main", "index": 0 }]]
+    },
+    "HTTP - PDFMonkey Get Status": {
+      "main": [[{ "node": "HTTP - Download PDF Binary", "type": "main", "index": 0 }]]
+    },
+    "HTTP - Download PDF Binary": {
+      "main": [
+        [
+          { "node": "Gmail - Send PDF Email", "type": "main", "index": 0 },
+          { "node": "Respond to Webhook", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "pdf" }, { "name": "documents" }, { "name": "automation" }],
+  "meta": {
+    "description": "Form submission triggers HTML invoice/report generation in Code node, submits to PDFMonkey API, polls for completion, downloads binary PDF, then emails it as an attachment via Gmail.",
+    "alternatives": "Replace PDFMonkey with: html-pdf-node (self-hosted), Puppeteer via n8n Execute Command, or DocRaptor API",
+    "prerequisites": [
+      "PDFMonkey account and API key (or alternative PDF API)",
+      "Gmail OAuth2 credentials",
+      "Set env variables: PDFMONKEY_API_KEY, PDFMONKEY_TEMPLATE_ID (optional)",
+      "Adjust Wait node to 10-15 seconds for complex PDFs"
+    ],
+    "testingScenario": {
+      "test_payload": {
+        "template": "invoice",
+        "invoiceNumber": "INV-2026-001",
+        "companyName": "The AI Stack",
+        "companyEmail": "billing@theaistack.com",
+        "clientName": "Acme Corp",
+        "clientEmail": "accounts@acme.com",
+        "dueDate": "Net 30",
+        "taxRate": 0.1,
+        "items": [
+          { "description": "AI Automation Consulting", "quantity": 10, "price": 250 },
+          { "description": "n8n Workflow Setup", "quantity": 5, "price": 150 }
+        ],
+        "notes": "Thank you for your business!"
+      }
+    }
+  }
+}

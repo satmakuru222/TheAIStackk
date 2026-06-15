@@ -1,0 +1,167 @@
+{
+  "name": "09 - Employee Offboarding Checklist",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "employee-offboarding",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook",
+      "name": "Form Webhook - Offboarding Submitted",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [260, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\n\nconst lastDay = body.lastDay || body.last_day;\nconst lastDayDate = lastDay ? new Date(lastDay) : new Date();\n\nreturn [{\n  json: {\n    employeeId: body.employeeId || body.employee_id || '',\n    fullName: body.fullName || body.full_name || `${body.firstName || ''} ${body.lastName || ''}`.trim(),\n    email: body.email || body.work_email || '',\n    personalEmail: body.personalEmail || body.personal_email || '',\n    department: body.department || '',\n    managerId: body.managerId || body.manager_id || '',\n    managerEmail: body.managerEmail || body.manager_email || '',\n    lastDay: lastDayDate.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }),\n    lastDayIso: lastDayDate.toISOString().split('T')[0],\n    reason: body.reason || 'Voluntary Resignation',\n    equipmentReturned: body.equipmentReturned || false,\n    initiatedBy: body.initiatedBy || body.hr_name || 'HR',\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "node-parse",
+      "name": "Code - Parse Offboarding Form",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 400]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.personalEmail || $json.email }}",
+        "subject": "Your Offboarding Details — Last Day: {{ $json.lastDay }}",
+        "message": "<html><body style=\"font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;\">\n<div style=\"background: #1a1a2e; padding: 24px; border-radius: 8px 8px 0 0;\">\n  <h1 style=\"color: white; margin: 0;\">Offboarding Confirmation</h1>\n</div>\n<div style=\"padding: 24px; background: #f9fafb;\">\n  <p>Dear {{ $json.fullName }},</p>\n  <p>We've initiated your offboarding process. Here's a summary of what to expect:</p>\n\n  <h3>📋 Offboarding Checklist</h3>\n  <ul style=\"line-height: 2;\">\n    <li>☐ Complete knowledge transfer documentation</li>\n    <li>☐ Return company equipment (laptop, badge, keys)</li>\n    <li>☐ Wrap up outstanding projects and hand off to team</li>\n    <li>☐ Complete exit interview with HR</li>\n    <li>☐ Update passwords and transfer account ownership</li>\n    <li>☐ Verify final paycheck details with Payroll</li>\n    <li>☐ Review non-disclosure/non-compete agreements</li>\n    <li>☐ Update LinkedIn and professional profiles</li>\n  </ul>\n\n  <div style=\"background: white; padding: 16px; border-radius: 8px; border-left: 4px solid #4f46e5; margin: 16px 0;\">\n    <p style=\"margin: 0;\"><strong>Last Day:</strong> {{ $json.lastDay }}</p>\n    <p style=\"margin: 8px 0 0;\"><strong>Department:</strong> {{ $json.department }}</p>\n  </div>\n\n  <p>We genuinely appreciate your contributions and wish you all the best in your next chapter.</p>\n  <p>Warm regards,<br><strong>HR Team</strong></p>\n</div>\n</body></html>",
+        "options": {}
+      },
+      "id": "node-gmail-employee",
+      "name": "Gmail - Email to Employee",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [700, 220],
+      "credentials": { "gmailOAuth2": { "id": "gmail-cred", "name": "Gmail OAuth2" } }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.managerEmail }}",
+        "subject": "Action Required: {{ $json.fullName }} Offboarding — Last Day {{ $json.lastDayIso }}",
+        "message": "<html><body style=\"font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;\">\n<div style=\"background: #dc2626; padding: 24px; border-radius: 8px 8px 0 0;\">\n  <h1 style=\"color: white; margin: 0;\">⚠️ Offboarding Notice — Manager Action Required</h1>\n</div>\n<div style=\"padding: 24px;\">\n  <p>Hi,</p>\n  <p><strong>{{ $json.fullName }}</strong> from your team has initiated offboarding.</p>\n  <p><strong>Last Day:</strong> {{ $json.lastDay }}</p>\n\n  <h3>Manager Checklist</h3>\n  <ul style=\"line-height: 2;\">\n    <li>☐ Schedule 1:1 transition meetings</li>\n    <li>☐ Identify and reassign open projects/tasks</li>\n    <li>☐ Arrange knowledge transfer sessions</li>\n    <li>☐ Request access revocation from IT by last day</li>\n    <li>☐ Complete manager portion of exit interview</li>\n    <li>☐ Update team org chart and documentation</li>\n    <li>☐ Post backfill requisition (if replacing)</li>\n  </ul>\n\n  <p>Please coordinate with HR (hr@company.com) for any questions.</p>\n</div>\n</body></html>",
+        "options": {}
+      },
+      "id": "node-gmail-manager",
+      "name": "Gmail - Email to Manager",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [700, 360],
+      "credentials": { "gmailOAuth2": { "id": "gmail-cred", "name": "Gmail OAuth2" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://admin.googleapis.com/admin/directory/v1/users/{{ $json.email }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"suspended\": false,\n  \"changePasswordAtNextLogin\": true,\n  \"customSchemas\": {\n    \"Employment_Data\": {\n      \"offboarding_date\": \"{{ $json.lastDayIso }}\",\n      \"offboarding_status\": \"initiated\"\n    }\n  }\n}",
+        "options": {}
+      },
+      "id": "node-gsuite-flag",
+      "name": "HTTP - Flag GSuite Account",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [700, 500],
+      "credentials": { "oAuth2Api": { "id": "gsuite-admin-cred", "name": "GSuite Admin OAuth2" } }
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": { "__rl": true, "value": "C_HR_OPS_CHANNEL", "mode": "id" },
+        "messageType": "block",
+        "blocksUi": {
+          "blocksValues": [
+            {
+              "type": "header",
+              "text": { "type": "plain_text", "text": "👋 Employee Offboarding Initiated" }
+            },
+            {
+              "type": "section",
+              "fields": [
+                { "type": "mrkdwn", "text": "*Employee:*\n{{ $json.fullName }}" },
+                { "type": "mrkdwn", "text": "*Department:*\n{{ $json.department }}" },
+                { "type": "mrkdwn", "text": "*Last Day:*\n{{ $json.lastDay }}" },
+                { "type": "mrkdwn", "text": "*Reason:*\n{{ $json.reason }}" }
+              ]
+            },
+            {
+              "type": "section",
+              "text": { "type": "mrkdwn", "text": "✅ Employee notified via email\n✅ Manager notified\n✅ GSuite account flagged for offboarding\n⏳ IT ticket: Manual action required\n⏳ Payroll: Manual action required" }
+            },
+            {
+              "type": "context",
+              "elements": [
+                { "type": "mrkdwn", "text": "Initiated by {{ $json.initiatedBy }} • {{ $json.timestamp }}" }
+              ]
+            }
+          ]
+        }
+      },
+      "id": "node-slack-hr",
+      "name": "Slack - HR Ops Channel",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [700, 640],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack API" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"success\": true, \"message\": \"Offboarding initiated for {{ $('Code - Parse Offboarding Form').item.json.fullName }}\" }"
+      },
+      "id": "node-respond",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [920, 400]
+    }
+  ],
+  "connections": {
+    "Form Webhook - Offboarding Submitted": {
+      "main": [[{ "node": "Code - Parse Offboarding Form", "type": "main", "index": 0 }]]
+    },
+    "Code - Parse Offboarding Form": {
+      "main": [
+        [
+          { "node": "Gmail - Email to Employee", "type": "main", "index": 0 },
+          { "node": "Gmail - Email to Manager", "type": "main", "index": 0 },
+          { "node": "HTTP - Flag GSuite Account", "type": "main", "index": 0 },
+          { "node": "Slack - HR Ops Channel", "type": "main", "index": 0 },
+          { "node": "Respond to Webhook", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "hr" }, { "name": "offboarding" }, { "name": "operations" }],
+  "meta": {
+    "description": "HR submits offboarding form → simultaneously emails employee checklist, emails manager action items, flags GSuite account for deactivation on last day, and posts summary to HR Ops Slack channel.",
+    "prerequisites": [
+      "Gmail OAuth2 credentials",
+      "GSuite Admin SDK OAuth2 (Directory API scope)",
+      "Slack Bot Token with chat:write scope",
+      "Update Slack channel IDs",
+      "GSuite Admin API: enable in Google Cloud Console",
+      "Add error handling for GSuite if Admin SDK not configured"
+    ],
+    "testingScenario": {
+      "test_payload": {
+        "fullName": "Jane Doe",
+        "email": "jane.doe@company.com",
+        "personalEmail": "jane@personal.com",
+        "department": "Engineering",
+        "managerEmail": "manager@company.com",
+        "lastDay": "2026-06-30",
+        "reason": "Voluntary Resignation",
+        "initiatedBy": "HR Admin"
+      }
+    }
+  }
+}

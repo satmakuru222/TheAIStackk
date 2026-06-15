@@ -1,0 +1,169 @@
+{
+  "name": "06 - RSS Feed → Social Media Auto-Post (AI Agent)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 9,14 * * 1-5" }]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule - Twice Daily Weekdays",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://feeds.feedburner.com/TechCrunch",
+        "options": {}
+      },
+      "id": "node-rss",
+      "name": "RSS Feed - Tech/AI News",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst now = new Date();\nconst sixHoursAgo = new Date(now - 6 * 60 * 60 * 1000);\n\n// Filter to recent items only, pick top 3\nconst recent = items\n  .filter(item => {\n    const pubDate = new Date(item.json.pubDate || item.json.isoDate || 0);\n    return pubDate > sixHoursAgo;\n  })\n  .slice(0, 3);\n\nif (recent.length === 0) {\n  // If no recent, take the latest item\n  return [items[0]];\n}\n\n// Return first item for posting\nconst item = recent[0].json;\nreturn [{\n  json: {\n    title: item.title || '',\n    link: item.link || '',\n    summary: (item.contentSnippet || item.content || item.summary || '').substring(0, 500),\n    pubDate: item.pubDate || item.isoDate || '',\n    author: item.creator || item.author || '',\n    categories: (item.categories || []).join(', ')\n  }\n}];"
+      },
+      "id": "node-filter-recent",
+      "name": "Code - Filter Recent Articles",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 300]
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "operation": "message",
+        "modelId": { "__rl": true, "value": "gpt-4o", "mode": "list" },
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "You are a social media expert for an AI/tech brand. Create engaging posts for both Twitter/X and LinkedIn from the article provided. Return valid JSON:\n{\n  \"twitter\": \"tweet text (max 270 chars, include 2-3 relevant hashtags, no link - it will be appended)\",\n  \"linkedin\": \"linkedin post (150-300 words, professional tone, include 3-5 hashtags at end, no link - it will be appended)\",\n  \"hashtags\": [\"array\", \"of\", \"top\", \"5\", \"hashtags\"]\n}\nMake content insightful, add value beyond the headline. No clickbait. No emojis unless they add value."
+            },
+            {
+              "role": "user",
+              "content": "Article Title: {{ $json.title }}\n\nSummary: {{ $json.summary }}\n\nCategories: {{ $json.categories }}\n\nPublished: {{ $json.pubDate }}"
+            }
+          ]
+        },
+        "options": { "temperature": 0.7, "maxTokens": 600 }
+      },
+      "id": "node-openai-write",
+      "name": "OpenAI - Generate Social Posts",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.7,
+      "position": [920, 300],
+      "credentials": { "openAiApi": { "id": "openai-cred", "name": "OpenAI API" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const article = $('Code - Filter Recent Articles').first().json;\nconst aiRaw = $input.first().json.message?.content || '{}';\n\nlet posts;\ntry {\n  posts = JSON.parse(aiRaw);\n} catch (e) {\n  posts = { twitter: article.title.substring(0, 250), linkedin: article.title + '\\n\\n' + article.summary };\n}\n\nconst tweetText = (posts.twitter || article.title).substring(0, 270) + '\\n\\n' + article.link;\nconst linkedinText = (posts.linkedin || article.title + '\\n\\n' + article.summary) + '\\n\\n🔗 ' + article.link;\n\nreturn [{\n  json: {\n    tweetText,\n    linkedinText,\n    hashtags: posts.hashtags || [],\n    articleTitle: article.title,\n    articleLink: article.link\n  }\n}];"
+      },
+      "id": "node-parse-posts",
+      "name": "Code - Parse & Format Posts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1140, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.twitter.com/2/tweets",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth1Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "text", "value": "={{ $json.tweetText }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-twitter-post",
+      "name": "HTTP Request - Post to Twitter/X",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1360, 200],
+      "credentials": {
+        "oAuth1Api": { "id": "twitter-oauth1-cred", "name": "Twitter OAuth1" }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.linkedin.com/v2/ugcPosts",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Restli-Protocol-Version", "value": "2.0.0" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"author\": \"urn:li:person:{{ $env['LINKEDIN_PERSON_ID'] }}\",\n  \"lifecycleState\": \"PUBLISHED\",\n  \"specificContent\": {\n    \"com.linkedin.ugc.ShareContent\": {\n      \"shareCommentary\": {\n        \"text\": {{ JSON.stringify($json.linkedinText) }}\n      },\n      \"shareMediaCategory\": \"ARTICLE\",\n      \"media\": [{\n        \"status\": \"READY\",\n        \"description\": { \"text\": \"{{ $('Code - Filter Recent Articles').item.json.summary.substring(0, 200) }}\" },\n        \"originalUrl\": \"{{ $('Code - Filter Recent Articles').item.json.link }}\",\n        \"title\": { \"text\": \"{{ $('Code - Filter Recent Articles').item.json.title }}\" }\n      }]\n    }\n  },\n  \"visibility\": {\n    \"com.linkedin.ugc.MemberNetworkVisibility\": \"PUBLIC\"\n  }\n}",
+        "options": {}
+      },
+      "id": "node-linkedin-post",
+      "name": "HTTP Request - Post to LinkedIn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1360, 400],
+      "credentials": {
+        "oAuth2Api": { "id": "linkedin-oauth2-cred", "name": "LinkedIn OAuth2" }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule - Twice Daily Weekdays": {
+      "main": [[{ "node": "RSS Feed - Tech/AI News", "type": "main", "index": 0 }]]
+    },
+    "RSS Feed - Tech/AI News": {
+      "main": [[{ "node": "Code - Filter Recent Articles", "type": "main", "index": 0 }]]
+    },
+    "Code - Filter Recent Articles": {
+      "main": [[{ "node": "OpenAI - Generate Social Posts", "type": "main", "index": 0 }]]
+    },
+    "OpenAI - Generate Social Posts": {
+      "main": [[{ "node": "Code - Parse & Format Posts", "type": "main", "index": 0 }]]
+    },
+    "Code - Parse & Format Posts": {
+      "main": [
+        [
+          { "node": "HTTP Request - Post to Twitter/X", "type": "main", "index": 0 },
+          { "node": "HTTP Request - Post to LinkedIn", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "social-media" }, { "name": "rss" }, { "name": "ai" }, { "name": "content" }],
+  "meta": {
+    "description": "Runs twice daily, fetches the latest article from an RSS feed, uses GPT-4o to write platform-native Twitter/X and LinkedIn posts, then publishes both via their respective APIs.",
+    "prerequisites": [
+      "OpenAI API key",
+      "Twitter/X Developer App with OAuth 1.0a credentials (tweet:write scope)",
+      "LinkedIn OAuth2 app with w_member_social scope",
+      "Set LINKEDIN_PERSON_ID env variable (get from LinkedIn API: GET /v2/me)",
+      "Update RSS feed URL to your target publication",
+      "Twitter API v2 access (Basic tier or above)"
+    ],
+    "testingScenario": {
+      "happy_path": "Manually trigger → verify GPT generates posts, check Twitter/LinkedIn APIs return 201",
+      "edge_cases": [
+        "RSS feed has no items → error handling needed",
+        "All articles older than 6 hours → falls back to latest item",
+        "Twitter rate limit (300 tweets/3hrs) → exponential backoff not included, add retry node",
+        "LinkedIn API returns 422 → check author URN format"
+      ]
+    }
+  }
+}

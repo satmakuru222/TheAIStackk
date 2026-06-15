@@ -1,0 +1,210 @@
+{
+  "name": "12 - Airtable → Google Sheets Sync (Bidirectional)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "*/30 * * * *" }]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Schedule - Every 30 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [260, 400]
+    },
+    {
+      "parameters": {
+        "operation": "list",
+        "baseId": { "__rl": true, "value": "YOUR_AIRTABLE_BASE_ID", "mode": "id" },
+        "tableId": { "__rl": true, "value": "YOUR_TABLE_ID", "mode": "id" },
+        "returnAll": true,
+        "options": {
+          "fields": ["Name", "Status", "Amount", "Date", "Notes", "Last Modified", "Record ID"],
+          "sort": [{ "field": "Last Modified", "direction": "desc" }]
+        }
+      },
+      "id": "node-airtable-read",
+      "name": "Airtable - Read Records",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [480, 280],
+      "credentials": { "airtableTokenApi": { "id": "airtable-cred", "name": "Airtable API" } }
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": { "__rl": true, "value": "YOUR_GSHEETS_SPREADSHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Data", "mode": "name" },
+        "options": { "headerRow": 1 }
+      },
+      "id": "node-gsheets-read",
+      "name": "Google Sheets - Read Rows",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [480, 520],
+      "credentials": { "googleSheetsOAuth2Api": { "id": "gsheets-cred", "name": "Google Sheets OAuth2" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "const airtableItems = $('Airtable - Read Records').all();\nconst sheetsItems = $('Google Sheets - Read Rows').all();\n\n// Build lookup maps keyed by Record ID\nconst airtableMap = {};\nfor (const item of airtableItems) {\n  const id = item.json.id || item.json['Record ID'] || item.json.fields?.['Record ID'];\n  if (id) airtableMap[id] = item.json.fields || item.json;\n}\n\nconst sheetsMap = {};\nfor (const item of sheetsItems) {\n  const id = item.json['Record ID'] || item.json['Airtable ID'];\n  if (id) sheetsMap[id] = { ...item.json, _rowIndex: item.json._rowIndex };\n}\n\n// Determine changes\nconst toAddToSheets = []; // In Airtable but not Sheets\nconst toUpdateInSheets = []; // In both but Airtable is newer\nconst toAddToAirtable = []; // In Sheets but not Airtable (new rows added directly to Sheets)\n\nfor (const [id, atRecord] of Object.entries(airtableMap)) {\n  if (!sheetsMap[id]) {\n    toAddToSheets.push({ airtableId: id, ...atRecord });\n  } else {\n    const sheetRecord = sheetsMap[id];\n    const atModified = new Date(atRecord['Last Modified'] || atRecord.lastModified || 0);\n    const sheetModified = new Date(sheetRecord['Last Modified'] || 0);\n    if (atModified > sheetModified) {\n      toUpdateInSheets.push({ airtableId: id, _rowIndex: sheetRecord._rowIndex, ...atRecord });\n    }\n  }\n}\n\nfor (const [id, sheetRecord] of Object.entries(sheetsMap)) {\n  if (!airtableMap[id] && sheetRecord['Sync To Airtable'] === 'YES') {\n    toAddToAirtable.push(sheetRecord);\n  }\n}\n\nreturn [{\n  json: {\n    toAddToSheets,\n    toUpdateInSheets,\n    toAddToAirtable,\n    summary: {\n      airtableRecords: airtableItems.length,\n      sheetsRows: sheetsItems.length,\n      newToSheets: toAddToSheets.length,\n      updatesToSheets: toUpdateInSheets.length,\n      newToAirtable: toAddToAirtable.length\n    }\n  }\n}];"
+      },
+      "id": "node-diff",
+      "name": "Code - Calculate Sync Diff",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.summary.newToSheets + $json.summary.updatesToSheets + $json.summary.newToAirtable }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ]
+        }
+      },
+      "id": "node-if-changes",
+      "name": "IF - Any Changes to Sync?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [920, 400]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "value": "YOUR_GSHEETS_SPREADSHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Data", "mode": "name" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Record ID": "={{ $json.airtableId }}",
+            "Name": "={{ $json.Name }}",
+            "Status": "={{ $json.Status }}",
+            "Amount": "={{ $json.Amount }}",
+            "Date": "={{ $json.Date }}",
+            "Notes": "={{ $json.Notes }}",
+            "Last Modified": "={{ $json['Last Modified'] }}"
+          },
+          "matchingColumns": ["Record ID"]
+        },
+        "options": {}
+      },
+      "id": "node-sheets-upsert",
+      "name": "Google Sheets - Upsert Records",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1140, 280],
+      "credentials": { "googleSheetsOAuth2Api": { "id": "gsheets-cred", "name": "Google Sheets OAuth2" } }
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "baseId": { "__rl": true, "value": "YOUR_AIRTABLE_BASE_ID", "mode": "id" },
+        "tableId": { "__rl": true, "value": "YOUR_TABLE_ID", "mode": "id" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Name": "={{ $json.Name }}",
+            "Status": "={{ $json.Status }}",
+            "Amount": "={{ $json.Amount }}",
+            "Date": "={{ $json.Date }}",
+            "Notes": "={{ $json.Notes }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-airtable-upsert",
+      "name": "Airtable - Upsert Records",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [1140, 520],
+      "credentials": { "airtableTokenApi": { "id": "airtable-cred", "name": "Airtable API" } }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "value": "YOUR_GSHEETS_SPREADSHEET_ID", "mode": "id" },
+        "sheetName": { "__rl": true, "value": "Sync Log", "mode": "name" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Timestamp": "={{ new Date().toISOString() }}",
+            "Airtable Records": "={{ $('Code - Calculate Sync Diff').item.json.summary.airtableRecords }}",
+            "Sheets Rows": "={{ $('Code - Calculate Sync Diff').item.json.summary.sheetsRows }}",
+            "Added to Sheets": "={{ $('Code - Calculate Sync Diff').item.json.summary.newToSheets }}",
+            "Updated in Sheets": "={{ $('Code - Calculate Sync Diff').item.json.summary.updatesToSheets }}",
+            "Added to Airtable": "={{ $('Code - Calculate Sync Diff').item.json.summary.newToAirtable }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-log-sync",
+      "name": "Google Sheets - Log Sync Run",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1360, 400],
+      "credentials": { "googleSheetsOAuth2Api": { "id": "gsheets-cred", "name": "Google Sheets OAuth2" } }
+    }
+  ],
+  "connections": {
+    "Schedule - Every 30 Minutes": {
+      "main": [
+        [
+          { "node": "Airtable - Read Records", "type": "main", "index": 0 },
+          { "node": "Google Sheets - Read Rows", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Airtable - Read Records": {
+      "main": [[{ "node": "Code - Calculate Sync Diff", "type": "main", "index": 0 }]]
+    },
+    "Google Sheets - Read Rows": {
+      "main": [[{ "node": "Code - Calculate Sync Diff", "type": "main", "index": 0 }]]
+    },
+    "Code - Calculate Sync Diff": {
+      "main": [[{ "node": "IF - Any Changes to Sync?", "type": "main", "index": 0 }]]
+    },
+    "IF - Any Changes to Sync?": {
+      "main": [
+        [
+          { "node": "Google Sheets - Upsert Records", "type": "main", "index": 0 },
+          { "node": "Airtable - Upsert Records", "type": "main", "index": 0 }
+        ],
+        [{ "node": "Google Sheets - Log Sync Run", "type": "main", "index": 0 }]
+      ]
+    },
+    "Google Sheets - Upsert Records": {
+      "main": [[{ "node": "Google Sheets - Log Sync Run", "type": "main", "index": 0 }]]
+    },
+    "Airtable - Upsert Records": {
+      "main": [[{ "node": "Google Sheets - Log Sync Run", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "sync" }, { "name": "airtable" }, { "name": "sheets" }],
+  "meta": {
+    "description": "Every 30 minutes: reads both Airtable and Google Sheets, calculates a diff keyed by Record ID, pushes new/updated records from Airtable → Sheets and Sheets → Airtable, then logs each sync run.",
+    "prerequisites": [
+      "Airtable Personal Access Token with data.records:read/write",
+      "Google Sheets OAuth2",
+      "Airtable table must have a 'Record ID' field (formula: RECORD_ID())",
+      "Google Sheet 'Data' tab with matching column headers",
+      "Google Sheet 'Sync Log' tab for audit trail",
+      "Update YOUR_AIRTABLE_BASE_ID, YOUR_TABLE_ID, YOUR_GSHEETS_SPREADSHEET_ID"
+    ],
+    "testingScenario": {
+      "happy_path": "Add record in Airtable → run workflow → verify row appears in Sheets within 30 min",
+      "edge_cases": [
+        "Conflict (both modified) → Airtable wins (newer Last Modified)",
+        "Deleted from Airtable → Sheets row remains (no delete sync to avoid accidents)",
+        "1000+ records → may hit n8n item limit, enable pagination",
+        "Sheets row without Record ID → skipped, not synced to Airtable"
+      ]
+    }
+  }
+}
